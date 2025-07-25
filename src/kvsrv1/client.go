@@ -4,6 +4,7 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
+	"time"
 )
 
 type Clerk struct {
@@ -72,6 +73,7 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
 		if !ok {
 			initial = false
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		if !initial && reply.Err == rpc.ErrVersion {
