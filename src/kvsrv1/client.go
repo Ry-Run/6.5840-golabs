@@ -6,7 +6,6 @@ import (
 	"6.5840/tester1"
 )
 
-
 type Clerk struct {
 	clnt   *tester.Clnt
 	server string
@@ -28,9 +27,19 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // The types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
+// 返回当前值和版本，如果键不存在，则返回 ErrNoKey。遇到除 ErrNoKey 以外的所有错误，它都会一直重试。
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := rpc.GetArgs{Key: key}
+	reply := rpc.GetReply{}
+	for {
+		ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		if reply.Err == rpc.OK {
+			return reply.Value, reply.Version, reply.Err
+		} else if reply.Err == rpc.ErrNoKey {
+			return "", 0, rpc.ErrNoKey
+		}
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -50,7 +59,24 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // The types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
+// 只要 Put 的版本与服务器上的版本匹配，就会用值更新键。如果版本号不匹配，服务器应该返回 ErrVersion。
+// 如果 Put 在其第一个 RPC 上收到 ErrVersion，Put 应该返回 ErrVersion，因为 Put 绝对没有在服务器上执行。
+// 如果服务器在重发 RPC 上返回 ErrVersion，那么 Put 必须返回 ErrMaybe 到应用程序，因为它前面的 RPC 可能已经由服务器成功处理，但响应丢失了，而 Clerk 不知道 Put 是否执行。
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	reply := rpc.PutReply{}
+
+	try := 1
+	for {
+		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		if !ok {
+			try++
+			continue
+		}
+		if try > 1 && reply.Err == rpc.ErrVersion {
+			return rpc.ErrMaybe
+		}
+		return reply.Err
+	}
 }

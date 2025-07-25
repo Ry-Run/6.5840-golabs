@@ -38,3 +38,7 @@ type GetReply struct {
 	Err     Err
 }
 
+// 增加版本号
+func (version *Tversion) Inc() {
+	*version++
+}

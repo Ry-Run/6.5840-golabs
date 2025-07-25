@@ -62,8 +62,8 @@ func (rs *rsmSrv) DoOp(req any) any {
 	case Null:
 		return &NullRep{}
 	default:
-		// wrong type! expecting an Inc.
-		log.Fatalf("DoOp should execute only Inc and not %T", req)
+		// wrong type! expecting an Update.
+		log.Fatalf("DoOp should execute only Update and not %T", req)
 	}
 	return nil
 }
