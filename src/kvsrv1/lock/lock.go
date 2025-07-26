@@ -52,6 +52,14 @@ func (lk *Lock) Acquire() {
 			// 抢占成功
 			lk.tversion.Inc()
 			return
+		} else if putErr == rpc.ErrMaybe {
+			// 可能执行成功，也可能没有执行成功，再检查一次标识位
+			value, tversion, _ := lk.ck.Get(lk.l)
+			if value == lk.cid {
+				// 抢占成功
+				lk.tversion = tversion
+				return
+			}
 		}
 	}
 }
