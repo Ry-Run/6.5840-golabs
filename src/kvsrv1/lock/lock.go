@@ -33,7 +33,7 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 func (lk *Lock) Acquire() {
 	// Your code here
 	for {
-		// 键值服务器有一个标识位，多客户端就来竞争这个标识位 l
+		// 键值服务器（test-and-set服务器）有一个标识位，多客户端就来竞争这个标识位 l
 		value, tversion, err := lk.ck.Get(lk.l)
 		if err == rpc.ErrNoKey {
 			// 标识位未初始化
