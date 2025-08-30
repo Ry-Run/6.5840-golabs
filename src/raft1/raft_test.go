@@ -148,7 +148,7 @@ func TestBasicAgree3B(t *testing.T) {
 
 		xindex := ts.one(index*100, servers, false)
 		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
+			t.Fatalf("got Index %v but expected %v", xindex, index)
 		}
 	}
 }
@@ -172,7 +172,7 @@ func TestRPCBytes3B(t *testing.T) {
 		cmd := tester.Randstring(5000)
 		xindex := ts.one(cmd, servers, false)
 		if xindex != index {
-			t.Fatalf("got index %v but expected %v", xindex, index)
+			t.Fatalf("got Index %v but expected %v", xindex, index)
 		}
 		sent += int64(len(cmd))
 	}
@@ -220,7 +220,7 @@ func TestFollowerFailure3B(t *testing.T) {
 		t.Fatalf("leader rejected Start()")
 	}
 	if index != 4 {
-		t.Fatalf("expected index 4, got %v", index)
+		t.Fatalf("expected Index 4, got %v", index)
 	}
 
 	time.Sleep(2 * RaftElectionTimeout)
@@ -326,7 +326,7 @@ func TestFailNoAgree3B(t *testing.T) {
 		t.Fatalf("leader rejected Start()")
 	}
 	if index != 2 {
-		t.Fatalf("expected index 2, got %v", index)
+		t.Fatalf("expected Index 2, got %v", index)
 	}
 
 	time.Sleep(2 * RaftElectionTimeout)
@@ -343,14 +343,14 @@ func TestFailNoAgree3B(t *testing.T) {
 	tester.AnnotateConnection(ts.g.GetConnected())
 
 	// the disconnected majority may have chosen a leader from
-	// among their own ranks, forgetting index 2.
+	// among their own ranks, forgetting Index 2.
 	leader2 := ts.checkOneLeader()
 	index2, _, ok2 := ts.srvs[leader2].Raft().Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
 	if index2 < 2 || index2 > 3 {
-		t.Fatalf("unexpected index %v", index2)
+		t.Fatalf("unexpected Index %v", index2)
 	}
 
 	ts.one(1000, servers, true)
@@ -427,7 +427,7 @@ loop:
 					// have succeeded
 					failed = true
 					details := fmt.Sprintf(
-						"term changed while waiting for %v servers to commit index %v",
+						"term changed while waiting for %v servers to commit Index %v",
 						servers, index)
 					tester.AnnotateCheckerNeutral(despretry, details)
 					break
@@ -502,7 +502,7 @@ func TestRejoin3B(t *testing.T) {
 	text := fmt.Sprintf("submitted commands [102 103 104] to %v", leader1)
 	tester.AnnotateInfoInterval(start, text, text)
 
-	// new leader commits, also for index=2
+	// new leader commits, also for Index=2
 	ts.one(103, 2, true)
 
 	// new leader network failure
@@ -672,9 +672,9 @@ loop:
 				continue loop
 			}
 			if starti+i != index1 {
-				desp := fmt.Sprintf("leader %v adds the command at the wrong index", leader)
+				desp := fmt.Sprintf("leader %v adds the command at the wrong Index", leader)
 				details := fmt.Sprintf(
-					"the command should locate at index %v, but the leader puts it at %v",
+					"the command should locate at Index %v, but the leader puts it at %v",
 					starti+i, index1)
 				tester.AnnotateCheckerFailure(desp, details)
 				t.Fatalf("Start() failed")
@@ -687,16 +687,16 @@ loop:
 				if ix == -1 {
 					// term changed -- try again
 					details := fmt.Sprintf(
-						"term changed while waiting for %v servers to commit index %v",
+						"term changed while waiting for %v servers to commit Index %v",
 						servers, starti+i)
 					tester.AnnotateCheckerNeutral(despretry, details)
 					continue loop
 				}
 				details := fmt.Sprintf(
-					"the command submitted at index %v in term %v is %v, but read %v",
+					"the command submitted at Index %v in term %v is %v, but read %v",
 					starti+i, term, cmds[i-1], cmd)
 				tester.AnnotateCheckerFailure("incorrect command committed", details)
-				t.Fatalf("wrong value %v committed for index %v; expected %v\n", cmd, starti+i, cmds)
+				t.Fatalf("wrong value %v committed for Index %v; expected %v\n", cmd, starti+i, cmds)
 			}
 		}
 
@@ -794,9 +794,9 @@ func TestPersist13C(t *testing.T) {
 	ts.restart(leader2)
 	tester.AnnotateRestart([]int{leader2})
 
-	tester.AnnotateCheckerBegin("wait for all servers to commit until index 4")
+	tester.AnnotateCheckerBegin("wait for all servers to commit until Index 4")
 	ts.wait(4, servers, -1) // wait for leader2 to join before killing i3
-	tester.AnnotateCheckerSuccess("all committed until index 4", "OK")
+	tester.AnnotateCheckerSuccess("all committed until Index 4", "OK")
 
 	i3 := (ts.checkOneLeader() + 1) % servers
 	ts.g.ShutdownServer(i3)
@@ -1346,8 +1346,8 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 
 		index2 := ts.one(rand.Int(), servers, true)
 		if index2 < index1+1 {
-			msg := fmt.Sprintf("index decreased from %v to %v", index1, index2)
-			tester.AnnotateCheckerFailure("incorrect behavior: index decreased", msg)
+			msg := fmt.Sprintf("Index decreased from %v to %v", index1, index2)
+			tester.AnnotateCheckerFailure("incorrect behavior: Index decreased", msg)
 			t.Fatalf(msg)
 		}
 	}

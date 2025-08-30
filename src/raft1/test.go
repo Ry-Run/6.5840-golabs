@@ -133,7 +133,7 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 		if old, oldok := rs.Logs(m.CommandIndex); oldok && old != v {
 			//log.Printf("%v: log %v; server %v\n", i, me.logs, rs.logs)
 			// some server has already committed a different value for this entry!
-			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
+			err_msg = fmt.Sprintf("commit Index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
@@ -163,16 +163,16 @@ func (ts *Test) checkNoLeader() {
 }
 
 func (ts *Test) checkNoAgreement(index int) {
-	text := fmt.Sprintf("checking no unexpected agreement at index %v", index)
+	text := fmt.Sprintf("checking no unexpected agreement at Index %v", index)
 	tester.AnnotateCheckerBegin(text)
 	n, _ := ts.nCommitted(index)
 	if n > 0 {
-		desp := fmt.Sprintf("unexpected agreement at index %v", index)
-		details := fmt.Sprintf("%v server(s) commit incorrectly index", n)
+		desp := fmt.Sprintf("unexpected agreement at Index %v", index)
+		details := fmt.Sprintf("%v server(s) commit incorrectly Index", n)
 		tester.AnnotateCheckerFailure(desp, details)
 		ts.Fatalf("%v committed but no majority", n)
 	}
-	desp := fmt.Sprintf("no unexpected agreement at index %v", index)
+	desp := fmt.Sprintf("no unexpected agreement at Index %v", index)
 	tester.AnnotateCheckerSuccess(desp, "OK")
 }
 
@@ -193,7 +193,7 @@ func (ts *Test) nCommitted(index int) (int, any) {
 
 		if ok {
 			if count > 0 && cmd != cmd1 {
-				text := fmt.Sprintf("committed values at index %v do not match (%v != %v)",
+				text := fmt.Sprintf("committed values at Index %v do not match (%v != %v)",
 					index, cmd, cmd1)
 				tester.AnnotateCheckerFailure("unmatched committed values", text)
 				ts.Fatalf(text)
@@ -212,7 +212,7 @@ func (ts *Test) nCommitted(index int) (int, any) {
 // indirectly checks that the servers agree on the
 // same value, since nCommitted() checks this,
 // as do the threads that read from applyCh.
-// returns index.
+// returns Index.
 // if retry==true, may submit the command multiple
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
@@ -315,11 +315,11 @@ func (ts *Test) wait(index int, n int, startTerm int) any {
 	}
 	nd, cmd := ts.nCommitted(index)
 	if nd < n {
-		desp := fmt.Sprintf("less than %v servers commit index %v", n, index)
+		desp := fmt.Sprintf("less than %v servers commit Index %v", n, index)
 		details := fmt.Sprintf(
-			"only %v (< %v) servers commit index %v at term %v", nd, n, index, startTerm)
+			"only %v (< %v) servers commit Index %v at term %v", nd, n, index, startTerm)
 		tester.AnnotateCheckerFailure(desp, details)
-		ts.Fatalf("only %d decided for index %d; wanted %d",
+		ts.Fatalf("only %d decided for Index %d; wanted %d",
 			nd, index, n)
 	}
 	return cmd
