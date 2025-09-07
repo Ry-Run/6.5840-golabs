@@ -51,8 +51,6 @@ type Raft struct {
 	// 事件处理系统
 	// 通用事件通道
 	eventChan chan interface{}
-	// 重置计时器信号，选举使用
-	timerResetChan chan struct{}
 	// 停止计时器信号
 	timerStopChan chan struct{}
 	// 选举计时器
@@ -78,32 +76,26 @@ type LogEntry struct {
 }
 
 type Log struct {
-	index0  int // entries 第一个元素在整个日志中的绝对位置，即当快照发生时，index0 仍然是连续的
-	offset  int // 最后一个日志在 entries 的相对位置，但不知道自己在整个日志中的绝对位置
+	index0  int // 即快照后第一个日志的索引，相当于绝对位置
 	entries []LogEntry
 }
 
 // return LastEntry's index and Term
 func (l *Log) LastEntry() (lastIndex int, lastTerm int) {
-	i := l.offset
+	i := len(l.entries) - 1
 	return l.index0 + i, l.entries[i].Term
 }
 
 // 从 index 开始追加日志，返回该日志所在位置和 term
 func (rf *Raft) AppendEntry(entries ...LogEntry) (int, int) {
-	log.Printf("S%v 追加日志: %+v", rf.me, entries)
-	l := rf.log
-	l.entries = append(l.entries, entries...)
-	l.offset += len(entries)
-	i := l.index0 + l.offset
-	return i, l.entries[i].Term
+	rf.log.entries = append(rf.log.entries, entries...)
+	return rf.log.LastEntry()
 }
 
-// slice 日志, index 是在整个 logs 中的绝对位置
+// slice [index, lastIndex] 日志, index 是在整个 logs 中的绝对位置
 func (l *Log) sliceEnd(index int) (entries []LogEntry, lastIndex, lastTerm int) {
 	// index 不能比 leader 最后一个日志 index 大
-	lastIndex = l.index0 + l.offset
-	lastTerm = l.entries[l.offset].Term
+	lastIndex, lastTerm = l.LastEntry()
 	if index > lastIndex {
 		return []LogEntry{}, lastIndex, lastTerm
 	}
@@ -122,10 +114,10 @@ func (l *Log) isSameLogEntry(index, term int) bool {
 	return true
 }
 
-// index 位置的 index（在整个 logs 的 index） 和 term
+// index 位置的 entry（在整个 logs 的 index） 和 term
 func (l *Log) getTerm(index int) (entry LogEntry) {
 	i := index - l.index0
-	if i > l.offset {
+	if i >= len(l.entries) {
 		return LogEntry{Term: -1}
 	}
 	return l.entries[i]
@@ -149,7 +141,6 @@ type VoteResponseEvent struct {
 
 // Leader 发送追加日志事件
 type StartAppendEntriesEvent struct {
-	to int // 追加给谁，意味着单播
 }
 
 // 追加日志响应事件
@@ -234,7 +225,7 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
-
+	// 0 位置不用制作为快照
 }
 
 // example RequestVote RPC arguments structure.
@@ -282,13 +273,10 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// todo
-	log.Printf("收到 AppendEntries %+v", args)
 	done := make(chan struct{})
 	rf.sendEvent(AppendEntriesEvent{args, reply, done})
 	<-done // 等待事件处理完成
 	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
-	// todo 排查思路应该是发送方的command数组为什么是 nil，所以这里收到的是 nil
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -324,8 +312,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	// todo
-	log.Printf("发送 AppendEntries %+v", args)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -336,7 +322,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.votedFor = rf.me
 	rf.voteGranted = 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.currentTerm, rf.me)
-	rf.timerResetChan <- struct{}{}
+	rf.resetElectionTimer(250, 400)
 
 	index, term := rf.log.LastEntry()
 	args := RequestVoteArgs{rf.currentTerm, rf.me, index, term}
@@ -430,6 +416,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 }
 
 func (rf *Raft) StartAppendEntriesEventHandler(e StartAppendEntriesEvent) {
+	log.Printf("S%v, 日志状态: %+v", rf.me, rf.log.entries) // 整个流程需要更清晰，全面的日志
 	// 这是心跳，多播
 	for i, _ := range rf.peers {
 		if i == rf.me {
@@ -445,25 +432,34 @@ func (rf *Raft) SendAppendForOne(to int) {
 	PrevLogIndex := rf.nextIndex[to] - 1
 	log.Printf("S%v 发送追加日志到 S%v, PrevLogIndex:  %v, logs: %+v", rf.me, to, PrevLogIndex, entries)
 	PrevLogTerm := rf.log.getTerm(PrevLogIndex).Term
-	args := &AppendEntriesArgs{rf.currentTerm, rf.me, PrevLogIndex, PrevLogTerm, entries, rf.commitIndex}
+	args := AppendEntriesArgs{rf.currentTerm, rf.me, PrevLogIndex, PrevLogTerm, entries, rf.commitIndex}
 	reply := AppendEntriesReply{}
-	rf.sendAppendEntries(to, args, &reply)
-	rf.sendEvent(AppendEntriesResponseEvent{to, &reply, appendLastIndex, appendLastTerm})
+	ok := rf.sendAppendEntries(to, &args, &reply)
+	if ok {
+		rf.sendEvent(AppendEntriesResponseEvent{to, &reply, appendLastIndex, appendLastTerm})
+	}
 }
 
 func (rf *Raft) AppendEntriesResponseHandler(e AppendEntriesResponseEvent) {
+	// 只处理当前 term 的响应
+	if e.appendLastTerm != rf.currentTerm {
+		return
+	}
+	log.Printf("S%v 追加日志收到 S%v 的响应: %+v", rf.me, e.from, e.reply)
 	// 如果 follower 任期比我大，则主动退位，即使这个 Follower 并不代表拥有最新日志，交给 Term 去处理，重新开始选举或者做其他什么事
 	if !e.reply.Success && e.reply.Term > rf.currentTerm {
+		log.Printf("S%v 的 term 更大，Leader S%v 退位", e.from, rf.me)
 		rf.state = Follower
 		rf.currentTerm = e.reply.Term
 		rf.resetElectionTimer(250, 400)
+		return
 	}
 
-	log.Printf("S%v 追加日志收到 S%v 的响应: %+v", rf.me, e.from, e.reply)
 	if e.reply.Success {
 		// 可以更新  nextIndex 和 matchIndex
 		rf.nextIndex[e.from] = e.appendLastIndex + 1
 		rf.matchIndex[e.from] = e.appendLastIndex + 1
+		log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, e.from, e.appendLastIndex+1, e.appendLastIndex+1)
 		// 判断是否能够：提交日志、应用到状态机
 		rf.leaderCommitAndApplyLog(e.appendLastIndex, e.appendLastTerm)
 	} else {
@@ -476,7 +472,7 @@ func (rf *Raft) AppendEntriesResponseHandler(e AppendEntriesResponseEvent) {
 
 func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	defer close(e.done)
-	log.Printf("S%v 收到 S%v 的追加日志请求: %+v", rf.me, e.args.LeaderId, e.args)
+	log.Printf("Term=%v 的 S%v 收到 Term=%v 的 S%v 的追加日志请求: %+v", rf.currentTerm, rf.me, e.args.Term, e.args.LeaderId, e.args)
 	// 无论如何 term 应该先保证，这意味着一个时代的开始
 	if e.args.Term < rf.currentTerm {
 		e.reply.Term = rf.currentTerm
@@ -485,19 +481,17 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	}
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
-	latestLogIndex, _ := rf.log.LastEntry()
-
-	if leaderCommitIndex > rf.commitIndex {
-		rf.followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex)
-	}
-
 	entries := rf.log.entries
+
 	if !rf.log.isSameLogEntry(prevLogIndex, prevLogTerm) {
 		e.reply.Success = false
 		// 优化，按 term 回溯
 		// 找到发生冲突的 term 的首个日志 index
-		_, term := rf.log.LastEntry()
+		e.reply.ConflictTerm = prevLogTerm
+		e.reply.ConflictIndex = prevLogIndex
+		term := e.args.PrevLogTerm
 		for i, entry := range entries {
+			log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
 			if entry.Term == term {
 				e.reply.ConflictTerm = term
 				e.reply.ConflictIndex = i + rf.log.index0
@@ -513,10 +507,17 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	rf.resetElectionTimer(250, 400)
 	// 追加日志/覆盖发生冲突的日志
 	rf.log.entries = entries[:e.args.PrevLogIndex+1]
-	log.Printf("Follower S%v 追加日志: %+v", rf.me, entries)
+	// 追加日志
 	rf.AppendEntry(e.args.Entries...)
+	log.Printf("Follower S%v 追加日志后: %+v", rf.me, rf.log.entries)
 	e.reply.Term = rf.currentTerm
 	e.reply.Success = true
+
+	// 准备提交日志
+	latestLogIndex, _ := rf.log.LastEntry()
+	rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
+	log.Printf("Follower S%v 设置commitIndex=%+v", rf.me, rf.commitIndex)
+	go rf.applyLog()
 }
 
 func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
@@ -524,36 +525,37 @@ func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
 	if rf.currentTerm == term && index > rf.commitIndex {
 		majority := 1
 		for _, matchIndex := range rf.matchIndex {
+			// 只能提交当前任期的日志
 			lastLogTerm := rf.log.getTerm(index).Term
 			if matchIndex > index && lastLogTerm == rf.currentTerm {
 				majority++
 			}
 		}
+		log.Printf("leader S%v 追加日志响应 majority=%v", rf.me, majority)
 		if majority > len(rf.peers)/2 {
 			// 提交追加的日志，即持久化
 			rf.commitIndex = index
 			// 只要 commitIndex > lastApplied，就可以应用到状态机
-			if rf.commitIndex > rf.lastApplied {
-				// 应用日志到 applyChan
-				go rf.applyLog()
-			}
+			go rf.applyLog()
 		}
 	}
 }
 
-// 应用日志
+// 如果 commitIndex > lastApplied 所有机器都应该应用日志
 func (rf *Raft) applyLog() {
-	// 循环应用，因为不支持批量应用
-	for i := rf.lastApplied; i <= rf.commitIndex; i++ {
-		entry := rf.log.getTerm(i)
-		rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: i}
-		rf.lastApplied++
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 应用日志到 applyChan
+	if rf.commitIndex > rf.lastApplied {
+		log.Printf("S%v 开始应用日志, 现有 logs: %+v, lastApplied=%v, commitIndex=%v", rf.me, rf.log.entries, rf.lastApplied, rf.commitIndex)
+		// 循环应用，因为不支持批量应用
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			entry := rf.log.getTerm(i)
+			rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: i}
+			rf.lastApplied++
+			log.Printf("S%v 应用日志：%+v, lastApplied=%v", rf.me, entry.Command, rf.lastApplied)
+		}
 	}
-}
-
-func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int) {
-	rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
-	rf.applyLog()
 }
 
 func (rf *Raft) handleEvent(event interface{}) {
@@ -590,7 +592,6 @@ func (rf *Raft) handleEvent(event interface{}) {
 // the leader.
 // 返回的只是 "开始处理" 的确认，不代表现在就提交了
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	log.Printf("Leader S%v 收到 command: %+v", rf.me, command)
 	index := -1
 	term := -1
 	isLeader := true
@@ -603,11 +604,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != Leader || rf.killed() {
 		return -1, -1, false
 	}
+	log.Printf("Leader S%v 收到 command: %+v", rf.me, command)
 	isLeader = true
 	entry := LogEntry{rf.currentTerm, command}
-	log.Printf("entry=%+v", entry)
-	// todo 为什么这个方法里面就为 nil 了？
 	index, term = rf.AppendEntry(entry)
+	log.Printf("leader S%v: 服务器追加日志后: %+v", rf.me, rf.log.entries)
+	// 立即追加日志
+	rf.resetElectionTimer(100, 200)
+	rf.sendEvent(StartAppendEntriesEvent{})
 	return index, term, isLeader
 }
 
@@ -662,8 +666,6 @@ func (rf *Raft) eventLoop() {
 			rf.handleEvent(event)
 		case <-rf.electionTimer.C:
 			rf.handleTimeout()
-		case <-rf.timerResetChan:
-			rf.resetElectionTimer(150, 151)
 		case <-rf.timerStopChan:
 			return
 		}
@@ -715,7 +717,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// index 0 放入 term 0，确保初始的一致性检查总是成功
 	rf.log = Log{
 		index0:  0,
-		offset:  0,
 		entries: []LogEntry{{Term: 0, Command: nil}},
 	}
 	rf.commitIndex = 0
@@ -728,7 +729,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.state = Follower
 	rf.eventChan = make(chan interface{}, 100)
-	rf.timerResetChan = make(chan struct{}, 1)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(150, 300))
 	// initialize from state persisted before a crash
