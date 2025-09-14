@@ -196,13 +196,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
-	//w := new(bytes.Buffer)
-	//e := labgob.NewEncoder(w)
-	//e.Encode(rf.CurrentTerm)
-	//e.Encode(rf.VotedFor)
-	//e.Encode(rf.Log)
-	//raftstate := w.Bytes()
-	//rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -361,7 +362,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.VotedFor = rf.me
 	rf.voteGranted = 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
-	rf.resetElectionTimer(250, 400)
+	rf.resetElectionTimer(150, 300)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
 
@@ -424,7 +425,7 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 		e.reply.Term = rf.CurrentTerm
 		e.reply.VoteGranted = true
 		// 计时器重置
-		rf.resetElectionTimer(250, 400)
+		rf.resetElectionTimer(150, 300)
 		DPrintf("Term: %v, S%v 投票给 S%v, reply VoteGranted=%v", rf.CurrentTerm, rf.me, e.args.CandidateId, e.reply.VoteGranted)
 		// CurrentTerm、VotedFor 变化，持久化一次
 		rf.persist()
@@ -468,7 +469,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 }
 
 func (rf *Raft) replicateLog(to int) {
-	heartbeatTicker := time.NewTicker(100 * time.Millisecond) // 心跳间隔
+	heartbeatTicker := time.NewTicker(50 * time.Millisecond) // 心跳间隔
 	defer heartbeatTicker.Stop()
 
 	for !rf.killed() {
@@ -525,7 +526,7 @@ func (rf *Raft) replicateLog(to int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", to, rf.me)
 			rf.state = Follower
-			rf.resetElectionTimer(250, 400)
+			rf.resetElectionTimer(150, 300)
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			// CurrentTerm 变化，持久化一次
@@ -545,6 +546,7 @@ func (rf *Raft) replicateLog(to int) {
 			rf.nextIndex[to] = appendLastIndex + 1
 			rf.matchIndex[to] = appendLastIndex
 			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, to, appendLastIndex+1, appendLastIndex, rf.Log.Entries)
+			//log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, to, appendLastIndex+1, appendLastIndex)
 			// 判断是否能够：提交日志、应用到状态机
 			rf.leaderCommitAndApplyLog(appendLastIndex, appendLastTerm)
 		} else {
@@ -604,15 +606,18 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	}
 
 	if e.args.Term > rf.CurrentTerm {
+		rf.state = Follower
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
+		rf.VotedFor = e.args.LeaderId
+		rf.persist()
 	}
 
 	e.reply.Term = rf.CurrentTerm
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
-	rf.resetElectionTimer(250, 400)
+	rf.resetElectionTimer(150, 300)
 
 	entries := rf.Log.Entries
 
@@ -633,7 +638,8 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		ConflictTerm := entry.Term
 		e.reply.ConflictTerm = ConflictTerm
 		for i, entry := range entries {
-			//log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
+			log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
+			//log.Printf("S%v 回溯日志, i=%v, PrevLogTerm=%v", rf.me, i, prevLogTerm)
 			if entry.Term == ConflictTerm {
 				e.reply.ConflictIndex = i + rf.Log.Index0
 				break
@@ -659,7 +665,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	log.Printf("Follower S%v 追加日志后: %+v, latestLogIndex: %v", rf.me, rf.Log.Entries, latestLogIndex)
 	e.reply.Success = true
 	// 尝试提交日志
-	go rf.followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex)
+	rf.followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex)
 }
 
 func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
@@ -684,8 +690,6 @@ func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
 }
 
 func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.commitIndex < leaderCommitIndex {
 		rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
 		log.Printf("Follower S%v 提交日志 commitIndex=%+v", rf.me, rf.commitIndex)
@@ -697,7 +701,8 @@ func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int)
 func (rf *Raft) applyLog() {
 	// 只要 commitIndex > lastApplied，就可以应用到状态机
 	if rf.commitIndex > rf.lastApplied {
-		log.Printf("S%v 开始应用日志, 现有 logs: %+v, lastApplied=%v, commitIndex=%v", rf.me, rf.Log.Entries, rf.lastApplied, rf.commitIndex)
+		//log.Printf("S%v 开始应用日志, 现有 logs: %+v, lastApplied=%v, commitIndex=%v", rf.me, rf.Log.Entries, rf.lastApplied, rf.commitIndex)
+		log.Printf("S%v 开始应用日志, lastApplied=%v, commitIndex=%v", rf.me, rf.lastApplied, rf.commitIndex)
 		// 循环应用，因为不支持批量应用
 		willApply := rf.lastApplied + 1
 		// 截取日志
@@ -708,7 +713,10 @@ func (rf *Raft) applyLog() {
 				rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
 			}
 		}()
+		// 重要!! 直接更新 lastApplied，否则上面的计算+协程优化没有意义
+		rf.lastApplied = rf.commitIndex
 		log.Printf("S%v 应用日志: %+v, lastApplied=%v, commitIndex=%v", rf.me, entries, rf.lastApplied, rf.commitIndex)
+		//log.Printf("S%v 应用日志: lastApplied=%v, commitIndex=%v", rf.me, rf.lastApplied, rf.commitIndex)
 	}
 }
 
