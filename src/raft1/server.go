@@ -27,11 +27,11 @@ type rfsrv struct {
 
 	mu   sync.Mutex
 	raft raftapi.Raft
-	logs map[int]any // copy of each server's committed entries
+	logs map[int]any // copy of each server's committed Entries
 }
 
 func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Persister, snapshot bool) *rfsrv {
-	//log.Printf("mksrv %d", srv)
+	//Log.Printf("mksrv %d", srv)
 	s := &rfsrv{
 		ts:        ts,
 		me:        srv,
@@ -61,7 +61,7 @@ func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Per
 }
 
 func (rs *rfsrv) Kill() {
-	//log.Printf("rs kill %d", rs.me)
+	//Log.Printf("rs kill %d", rs.me)
 	rs.mu.Lock()
 	rs.raft = nil // tester will call Kill() on rs.raft
 	rs.mu.Unlock()
@@ -93,7 +93,7 @@ func (rs *rfsrv) Logs(i int) (any, bool) {
 	return v, ok
 }
 
-// applier reads message from apply ch and checks that they match the log
+// applier reads message from apply ch and checks that they match the Log
 // contents
 func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 	for m := range applyCh {

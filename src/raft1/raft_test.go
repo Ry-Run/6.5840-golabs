@@ -10,7 +10,7 @@ package raft
 
 import (
 	"fmt"
-	// "log"
+	// "Log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -494,7 +494,7 @@ func TestRejoin3B(t *testing.T) {
 	ts.g.DisconnectAll(leader1)
 	tester.AnnotateConnection(ts.g.GetConnected())
 
-	// make old leader try to agree on some entries
+	// make old leader try to agree on some Entries
 	start := tester.GetAnnotateTimestamp()
 	ts.srvs[leader1].Raft().Start(102)
 	ts.srvs[leader1].Raft().Start(103)
@@ -718,13 +718,13 @@ loop:
 		}
 
 		if total2-total1 > (iters+1+3)*3 {
-			details := fmt.Sprintf("number of RPC used for %v entries = %v > %v",
+			details := fmt.Sprintf("number of RPC used for %v Entries = %v > %v",
 				iters, total2-total1, (iters+1+3)*3)
 			tester.AnnotateCheckerFailure("used too many RPCs for agreement", details)
-			t.Fatalf("too many RPCs (%v) for %v entries\n", total2-total1, iters)
+			t.Fatalf("too many RPCs (%v) for %v Entries\n", total2-total1, iters)
 		}
 
-		details := fmt.Sprintf("number of RPC used for %v entries = %v <= %v",
+		details := fmt.Sprintf("number of RPC used for %v Entries = %v <= %v",
 			iters, total2-total1, (iters+1+3)*3)
 		tester.AnnotateCheckerSuccess("used reasonable number of RPCs for agreement", details)
 
@@ -893,11 +893,11 @@ func TestPersist33C(t *testing.T) {
 
 // Test the scenarios described in Figure 8 of the extended Raft paper. Each
 // iteration asks a leader, if there is one, to insert a command in the Raft
-// log.  If there is a leader, that leader will fail quickly with a high
+// Log.  If there is a leader, that leader will fail quickly with a high
 // probability (perhaps without committing the command), or crash after a while
 // with low probability (most likey committing the command).  If the number of
 // alive servers isn't enough to form a majority, perhaps start a new server.
-// The leader in a new term may try to finish replicating log entries that
+// The leader in a new term may try to finish replicating Log Entries that
 // haven't been committed yet.
 func TestFigure83C(t *testing.T) {
 	servers := 5
@@ -1149,7 +1149,7 @@ func internalChurn(t *testing.T, reliable bool) {
 		// Make crash/restart infrequent enough that the peers can often
 		// keep up, but not so infrequent that everything has settled
 		// down from one change to the next. Pick a value smaller than
-		// the election timeout, but not hugely smaller.
+		// the election Timeout, but not hugely smaller.
 		time.Sleep((RaftElectionTimeout * 7) / 10)
 	}
 
@@ -1196,7 +1196,7 @@ func internalChurn(t *testing.T, reliable bool) {
 	}
 
 	tester.AnnotateCheckerBegin(
-		"checking if committed values observed by the clients remain in the log")
+		"checking if committed values observed by the clients remain in the Log")
 	for _, v1 := range values {
 		ok := false
 		for _, v2 := range really {
@@ -1208,7 +1208,7 @@ func internalChurn(t *testing.T, reliable bool) {
 			ts.t.Fatalf("didn't find a value")
 		}
 	}
-	tester.AnnotateCheckerSuccess("committed values remain in the log", "OK")
+	tester.AnnotateCheckerSuccess("committed values remain in the Log", "OK")
 }
 
 func TestReliableChurn3C(t *testing.T) {
@@ -1317,7 +1317,7 @@ func TestSnapshotInstallUnCrash3D(t *testing.T) {
 
 // do the servers persist the snapshots, and
 // restart using snapshot along with the
-// tail of the log?
+// tail of the Log?
 func TestSnapshotAllCrash3D(t *testing.T) {
 	servers := 3
 	iters := 5

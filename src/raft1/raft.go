@@ -434,8 +434,6 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 	}
 }
 
-// todo append日志和心跳分开，心跳定期发，日志在收到新log发送，如果超时自觉退位避免接收到 command
-
 func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	// 目前实现是不会重复投票，所以只统计一次，如果请求丢失还会补发请求，那么这里要修改
 	//DPrintf("Term: %v, S%v, 收到 S%v 投票响应: %v", rf.CurrentTerm, rf.me, e.from, e.reply.VoteGranted)
@@ -461,9 +459,10 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.resetElectionTimer(150, 200)
 		// 立即发送心跳
 		rf.sendEvent(StartAppendEntriesEvent{true})
+		lastIndex, _ := rf.Log.LastEntry()
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
-			rf.nextIndex[i] = 1
+			rf.nextIndex[i] = lastIndex + 1
 			rf.matchIndex[i] = 0
 		}
 	}
@@ -485,6 +484,8 @@ func (rf *Raft) StartAppendEntriesEventHandler(e StartAppendEntriesEvent) {
 }
 
 func (rf *Raft) SendAppendForOne(to int, isHeartbeat bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// 利用心跳完成日志追赶
 	var entries []LogEntry
 	var appendLastIndex, appendLastTerm int
@@ -498,7 +499,6 @@ func (rf *Raft) SendAppendForOne(to int, isHeartbeat bool) {
 		}
 	}
 	PrevLogIndex := rf.nextIndex[to] - 1
-	//log.Printf("S%v 发送追加日志到 S%v, PrevLogIndex:  %v, logs: %+v", rf.me, to, PrevLogIndex, entries)
 	PrevLogTerm := rf.Log.getEntry(PrevLogIndex).Term
 	var s string
 	if isHeartbeat {
@@ -545,14 +545,15 @@ func (rf *Raft) AppendEntriesResponseHandler(e AppendEntriesResponseEvent) {
 		// 可以更新  nextIndex 和 matchIndex
 		rf.nextIndex[e.from] = e.appendLastIndex + 1
 		rf.matchIndex[e.from] = e.appendLastIndex
-		log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, e.from, e.appendLastIndex+1, e.appendLastIndex)
+		log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, e.from, e.appendLastIndex+1, e.appendLastIndex, rf.Log.Entries)
 		// 判断是否能够：提交日志、应用到状态机
-		rf.leaderCommitAndApplyLog(e.appendLastIndex, e.appendLastTerm)
+		go rf.leaderCommitAndApplyLog(e.appendLastIndex, e.appendLastTerm)
 	} else {
 		conflictTerm := e.reply.ConflictTerm
 		if conflictTerm == -1 {
 			// case 3: Follower 的日志太短
 			rf.nextIndex[e.from] = e.reply.XLen
+			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v", rf.me, e.from, e.reply.XLen)
 		} else {
 			hasConflictTerm := false
 			for _, entry := range rf.Log.Entries {
@@ -561,7 +562,6 @@ func (rf *Raft) AppendEntriesResponseHandler(e AppendEntriesResponseEvent) {
 					break
 				}
 			}
-
 			if !hasConflictTerm {
 				// case 1: Leader 没有 ConflictTerm: 意味着 Leader 的日志在这个任期上是"缺失"的
 				// 应该直接回退到 Follower 中该任期开始的位置（XIndex），从这里开始同步日志，覆盖掉 Follower 该任期的日志。
@@ -580,7 +580,7 @@ func (rf *Raft) AppendEntriesResponseHandler(e AppendEntriesResponseEvent) {
 		}
 
 		// 马上重试
-		rf.SendAppendForOne(e.from, false)
+		go rf.SendAppendForOne(e.from, false)
 	}
 }
 
@@ -589,18 +589,20 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	log.Printf("Term=%v 的 S%v 收到 Term=%v 的 S%v 的追加日志请求: %+v", rf.CurrentTerm, rf.me, e.args.Term, e.args.LeaderId, e.args)
 	// 无论如何 term 应该先保证，这意味着一个时代的开始
 	if e.args.Term < rf.CurrentTerm {
-		e.reply.Term = rf.CurrentTerm
 		e.reply.Success = false
 		return
 	}
 
+	if e.args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = e.args.Term
+		rf.leaderId = e.args.LeaderId
+	}
+
+	e.reply.Term = rf.CurrentTerm
+
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
-
-	if len(e.args.Entries) == 0 {
-		// 心跳
-		rf.resetElectionTimer(250, 400)
-	}
+	rf.resetElectionTimer(250, 400)
 
 	entries := rf.Log.Entries
 
@@ -634,32 +636,25 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	// 确定 Leader 的领导地位
 	rf.state = Follower
 	rf.leaderId = e.args.LeaderId
-	// 获取截断日志的相对索引 todo 会不会在快照内
-	prevLogRelativeIndex := e.args.PrevLogIndex - rf.Log.Index0
-	// 追加日志/覆盖发生冲突的日志
-	rf.Log.Entries = entries[:prevLogRelativeIndex+1]
+	// 获取截断日志的相对索引，e.args.PrevLogIndex >= rf.commitIndex 确保不会擦除提交的日志
 	if len(e.args.Entries) > 0 {
+		prevLogRelativeIndex := e.args.PrevLogIndex - rf.Log.Index0
+		// 追加日志/覆盖发生冲突的日志
+		rf.Log.Entries = entries[:prevLogRelativeIndex+1]
 		// 追加日志
 		rf.AppendEntry(e.args.Entries...)
+		// 经历了删除、追加日志，重新计算最新日志 index
+		latestLogIndex, _ = rf.Log.LastEntry()
 	}
-	// 经历了删除、追加日志，重新计算最新日志 index
-	latestLogIndex, _ = rf.Log.LastEntry()
 	log.Printf("Follower S%v 追加日志后: %+v, latestLogIndex: %v", rf.me, rf.Log.Entries, latestLogIndex)
-	e.reply.Term = rf.CurrentTerm
 	e.reply.Success = true
 	// 尝试提交日志
-	rf.followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex)
-}
-
-func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int) {
-	if rf.commitIndex < leaderCommitIndex {
-		rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
-		log.Printf("Follower S%v 提交日志 commitIndex=%+v", rf.me, rf.commitIndex)
-		go rf.applyLog()
-	}
+	go rf.followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex)
 }
 
 func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// 只有提交当前 term 日志时，才能采用大多数副本的方式，否则可能会被覆盖
 	if rf.CurrentTerm == term && index > rf.commitIndex {
 		majority := 1
@@ -675,22 +670,31 @@ func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
 			rf.commitIndex = index
 			log.Printf("leader S%v 提交日志 commitIndex=%v", rf.me, rf.commitIndex)
 			// 尝试应用到状态机
-			go rf.applyLog()
+			rf.applyLog()
 		}
+	}
+}
+
+func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.commitIndex < leaderCommitIndex {
+		rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
+		log.Printf("Follower S%v 提交日志 commitIndex=%+v", rf.me, rf.commitIndex)
+		rf.applyLog()
 	}
 }
 
 // 如果 commitIndex > lastApplied 所有机器都应该应用日志
 func (rf *Raft) applyLog() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	// 只要 commitIndex > lastApplied，就可以应用到状态机
 	if rf.commitIndex > rf.lastApplied {
 		log.Printf("S%v 开始应用日志, 现有 logs: %+v, lastApplied=%v, commitIndex=%v", rf.me, rf.Log.Entries, rf.lastApplied, rf.commitIndex)
 		// 循环应用，因为不支持批量应用
-		applied := rf.lastApplied
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		applied := rf.lastApplied + 1
+		for i := applied; i <= rf.commitIndex; i++ {
 			entry := rf.Log.getEntry(i)
+			// todo 协程
 			rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: i}
 			rf.lastApplied++
 		}

@@ -2,7 +2,7 @@ package raft
 
 import (
 	"fmt"
-	//log
+	//Log
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -131,7 +131,7 @@ func (ts *Test) checkLogs(i int, m raftapi.ApplyMsg) (string, bool) {
 	me := ts.srvs[i]
 	for j, rs := range ts.srvs {
 		if old, oldok := rs.Logs(m.CommandIndex); oldok && old != v {
-			//log.Printf("%v: log %v; server %v\n", i, me.logs, rs.logs)
+			//Log.Printf("%v: Log %v; server %v\n", i, me.logs, rs.logs)
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit Index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -176,7 +176,7 @@ func (ts *Test) checkNoAgreement(index int) {
 	tester.AnnotateCheckerSuccess(desp, "OK")
 }
 
-// how many servers think a log entry is committed?
+// how many servers think a Log entry is committed?
 func (ts *Test) nCommitted(index int) (int, any) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -242,7 +242,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 				ts.srvs[starts].mu.Unlock()
 			}
 			if rf != nil {
-				//log.Printf("peer %d Start %v", starts, cmd)
+				//Log.Printf("peer %d Start %v", starts, cmd)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
@@ -279,7 +279,7 @@ func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 	}
 	if ts.checkFinished() == false {
 		desp := fmt.Sprintf("agreement of %.8s failed", textcmd)
-		tester.AnnotateCheckerFailure(desp, "failed after 10-second timeout")
+		tester.AnnotateCheckerFailure(desp, "failed after 10-second Timeout")
 		ts.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
