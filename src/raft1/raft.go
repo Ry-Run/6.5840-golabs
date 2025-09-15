@@ -88,7 +88,7 @@ func (l *Log) LastEntry() (lastIndex int, lastTerm int) {
 	return l.Index0 + i, l.Entries[i].Term
 }
 
-// 从 index 开始追加日志，返回该日志所在位置和 term
+// 从 index 开始追加日志，返回第一个日志所在位置和 term
 func (rf *Raft) AppendEntry(entries ...LogEntry) (int, int) {
 	rf.Log.Entries = append(rf.Log.Entries, entries...)
 	// 持久化一次 Entries
@@ -109,18 +109,18 @@ func (l *Log) sliceEnd(index int) (entries []LogEntry, lastIndex, lastTerm int) 
 	return entries, lastIndex, lastTerm
 }
 
-// slice [start, end] 日志, index 是在整个 logs 中的绝对位置，返回 start 的绝对位置
+// slice [start, end] 日志, start、end 是在整个 logs 中的绝对位置，返回 start 的绝对位置
 func (l *Log) slice(start, end int) (entries []LogEntry, startIndex, startTerm int) {
-	lastIndex, lastTerm := l.LastEntry()
+	lastIndex, _ := l.LastEntry()
 
 	if 0 <= start && start <= end && end <= lastIndex {
-		start := start - l.Index0
-		end := end - l.Index0
-		entries = l.Entries[start : end+1]
+		relativeStart := start - l.Index0
+		relativeEnd := end - l.Index0
+		entries = l.Entries[relativeStart : relativeEnd+1]
 		return entries, start, l.getEntry(start).Term
 	}
 
-	return []LogEntry{}, lastIndex, lastTerm
+	return []LogEntry{}, -1, -1
 }
 
 // 指定索引位置的日志条目，是否为同一个日志
@@ -132,7 +132,7 @@ func (l *Log) isSameLogEntry(index, term int) bool {
 	return true
 }
 
-// index 位置的 entry（在整个 logs 的 index） 和 term
+// index 位置的 entry（在整个 logs 的 index，即绝对位置） 和 term
 func (l *Log) getEntry(index int) (entry LogEntry) {
 	i := index - l.Index0
 	if i >= len(l.Entries) {
@@ -362,7 +362,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.VotedFor = rf.me
 	rf.voteGranted = 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
-	rf.resetElectionTimer(150, 300)
+	rf.resetElectionTimer(250, 400)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
 
@@ -425,7 +425,7 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 		e.reply.Term = rf.CurrentTerm
 		e.reply.VoteGranted = true
 		// 计时器重置
-		rf.resetElectionTimer(150, 300)
+		rf.resetElectionTimer(250, 400)
 		DPrintf("Term: %v, S%v 投票给 S%v, reply VoteGranted=%v", rf.CurrentTerm, rf.me, e.args.CandidateId, e.reply.VoteGranted)
 		// CurrentTerm、VotedFor 变化，持久化一次
 		rf.persist()
@@ -526,7 +526,7 @@ func (rf *Raft) replicateLog(to int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", to, rf.me)
 			rf.state = Follower
-			rf.resetElectionTimer(150, 300)
+			//rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			// CurrentTerm 变化，持久化一次
@@ -617,7 +617,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
-	rf.resetElectionTimer(150, 300)
+	rf.resetElectionTimer(250, 400)
 
 	entries := rf.Log.Entries
 
@@ -642,6 +642,8 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 			//log.Printf("S%v 回溯日志, i=%v, PrevLogTerm=%v", rf.me, i, prevLogTerm)
 			if entry.Term == ConflictTerm {
 				e.reply.ConflictIndex = i + rf.Log.Index0
+				// 立即删除冲突的日志
+				rf.Log.Entries = entries[:e.reply.ConflictIndex]
 				break
 			}
 		}
@@ -884,7 +886,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.eventChan = make(chan interface{}, 100)
 	rf.timerStopChan = make(chan struct{})
-	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(150, 300))
+	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(200, 350))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
