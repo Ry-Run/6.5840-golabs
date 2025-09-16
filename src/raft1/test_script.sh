@@ -12,7 +12,7 @@ while [ $count -le $max_attempts ]; do
     start_time=$(date +%s.%N)
 
     # 执行测试并输出到日志文件
-    go test -run 3C > /home/run/workspace/6.5840-golabs-2025/raft-3C.log 2>&1
+    go test -run 3C > /home/run/workspace/6.5840-golabs-2025/raft.log 2>&1
 
     # 记录结束时间
     end_time=$(date +%s.%N)
@@ -25,7 +25,7 @@ while [ $count -le $max_attempts ]; do
     printf "本次耗时: %.6f 秒\n" $elapsed
 
     # 检查日志中是否包含8个"Passed"
-    passed_count=$(grep -c "Passed" /home/run/workspace/6.5840-golabs-2025/raft-3C.log)
+    passed_count=$(grep -c "Passed" /home/run/workspace/6.5840-golabs-2025/raft.log)
 
     if [ $passed_count -eq $goal ]; then
         echo "第 $count 次测试通过，找到 $passed_count 个 Passed"

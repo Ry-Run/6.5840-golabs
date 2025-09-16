@@ -165,10 +165,7 @@ type AppendEntriesEvent struct {
 }
 
 func (rf *Raft) sendEvent(event interface{}) {
-	select {
-	case rf.eventChan <- event:
-	default:
-	}
+	rf.eventChan <- event
 }
 
 // return CurrentTerm and whether this server
@@ -231,28 +228,16 @@ func (rf *Raft) readPersist(data []byte) {
 	var VotedFor int
 	var Log Log
 
-	if d.Decode(&CurrentTerm) != nil {
-		log.Printf("CurrentTerm 解码失败 in readPersist")
-		return
-	}
-
-	if d.Decode(&VotedFor) != nil {
-		log.Printf("VotedFor 解码失败 in readPersist")
-		return
-	}
-
-	if d.Decode(&Log) != nil {
-		log.Printf("Log 解码失败 in readPersist")
+	if d.Decode(&CurrentTerm) != nil ||
+		d.Decode(&VotedFor) != nil ||
+		d.Decode(&Log) != nil {
+		log.Printf("解码失败 in readPersist")
 		return
 	}
 
 	rf.CurrentTerm = CurrentTerm
 	rf.VotedFor = VotedFor
 	rf.Log = Log
-
-	index, _ := rf.Log.LastEntry()
-	rf.lastApplied = index
-	rf.commitIndex = index
 }
 
 // how many bytes in Raft's persisted Log?
@@ -311,9 +296,9 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 	// 可选的优化
-	ConflictTerm  int // 发生冲突的 entry 的 term
-	ConflictIndex int // 发生冲突的 entry 的 term 的首个日志索引
-	XLen          int // Follower 的日志长度
+	XTerm  int // 发生冲突的 entry 的 term
+	XIndex int // 发生冲突的 entry 的 term 的首个日志索引
+	XLen   int // Follower 的日志长度
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -450,7 +435,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		return
 	}
 
-	// 忽略过期的响应 todo 是不是可以放在修改日志那里
+	// 忽略过期的响应
 	if e.reply.Term < rf.CurrentTerm {
 		DPrintf("Term: %v, S%v, 收到 S%v 在 term=%v 时的投票响应, 丢弃响应", rf.CurrentTerm, rf.me, e.from, e.reply.Term)
 		return
@@ -461,7 +446,6 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	}
 
 	if !e.reply.VoteGranted {
-		//DPrintf("Term: %v, S%v 拒绝给 S%v 选票", rf.CurrentTerm, e.from, rf.me)
 		return
 	}
 
@@ -486,7 +470,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	}
 }
 
-func (rf *Raft) replicateLog(to int) {
+func (rf *Raft) replicateLog(peer int) {
 	heartbeatTicker := time.NewTicker(50 * time.Millisecond) // 心跳间隔
 	defer heartbeatTicker.Stop()
 
@@ -498,51 +482,50 @@ func (rf *Raft) replicateLog(to int) {
 		}
 
 		// 检查是否有日志需要复制
-		nextIndex := rf.nextIndex[to]
+		nextIndex := rf.nextIndex[peer]
 		lastIndex, _ := rf.Log.LastEntry()
 		hasLogsToReplicate := nextIndex <= lastIndex
 		var s string
 
 		// 准备参数
 		var entries []LogEntry
-		var appendLastIndex, appendLastTerm int
 
 		// 有日志时发生日志，空闲时发送心跳
 		if hasLogsToReplicate {
 			// 有日志需要复制
-			entries, appendLastIndex, appendLastTerm = rf.Log.sliceEnd(rf.nextIndex[to])
+			entries, _, _ = rf.Log.sliceEnd(rf.nextIndex[peer])
 			s = "日志"
 		} else {
 			// 心跳负责保持地位、确认日志一致性
 			entries = []LogEntry{}
-			appendLastIndex, appendLastTerm = rf.Log.LastEntry()
 			s = "心跳"
 		}
 
-		PrevLogIndex := rf.nextIndex[to] - 1
+		PrevLogIndex := max(rf.nextIndex[peer]-1, 0)
 		PrevLogTerm := rf.Log.getEntry(PrevLogIndex).Term
 
-		log.Printf("S%v 发送%s到 S%v, PrevLogIndex:  %v, PrevLogTerm: %v, commitIndex:%v", rf.me, s, to, PrevLogIndex, PrevLogTerm, rf.commitIndex)
+		log.Printf("S%v 发送%s到 S%v, PrevLogIndex: %v, PrevLogTerm: %v, commitIndex:%v", rf.me, s, peer, PrevLogIndex, PrevLogTerm, rf.commitIndex)
 		args := AppendEntriesArgs{rf.CurrentTerm, rf.me, PrevLogIndex, PrevLogTerm, entries, rf.commitIndex}
 
 		// 阻塞调用前解锁
 		rf.mu.Unlock()
 		//  发送 AppendEntries 请求
 		var reply AppendEntriesReply
-		ok := rf.sendAppendEntries(to, &args, &reply)
+		ok := rf.sendAppendEntries(peer, &args, &reply)
 
 		if !ok {
 			// RPC 失败，等待一段时间后重试
+			time.Sleep(time.Millisecond * 50)
 			continue
 		}
 
 		// 处理响应
 		rf.mu.Lock()
 
-		log.Printf("leader S%v 收到 S%v 的追加日志响应: %+v", rf.me, to, reply)
+		log.Printf("leader S%v 收到 S%v 的追加日志响应: %+v", rf.me, peer, reply)
 		// 如果 follower 任期比我大，则主动退位
 		if reply.Term > rf.CurrentTerm {
-			log.Printf("S%v 的 term 更大，Leader S%v 退位", to, rf.me)
+			log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
 			rf.state = Follower
 			rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
@@ -560,41 +543,40 @@ func (rf *Raft) replicateLog(to int) {
 		}
 
 		if reply.Success {
+			commitIndex := PrevLogIndex + len(entries)
 			// 可以更新  nextIndex 和 matchIndex
-			rf.nextIndex[to] = appendLastIndex + 1
-			rf.matchIndex[to] = appendLastIndex
-			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, to, appendLastIndex+1, appendLastIndex, rf.Log.Entries)
-			//log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, to, appendLastIndex+1, appendLastIndex)
+			rf.nextIndex[peer] = commitIndex + 1
+			rf.matchIndex[peer] = commitIndex
+			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, peer, PrevLogIndex+1, PrevLogIndex, rf.Log.Entries)
+			//log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, peer, PrevLogIndex + 1, PrevLogIndex)
 			// 判断是否能够：提交日志、应用到状态机
-			rf.leaderCommitAndApplyLog(appendLastIndex, appendLastTerm)
+			if len(entries) > 0 {
+				rf.leaderCommitAndApplyLog(commitIndex, entries[len(entries)-1].Term)
+			}
 		} else {
-			conflictTerm := reply.ConflictTerm
+			conflictTerm := reply.XTerm
 			if conflictTerm == -1 {
 				// case 3: Follower 的日志太短
-				rf.nextIndex[to] = reply.XLen
-				log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v", rf.me, to, reply.XLen)
+				rf.nextIndex[peer] = max(reply.XLen, 1)
+				log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v", rf.me, peer, max(reply.XLen, 1))
 			} else {
-				hasConflictTerm := false
-				for _, entry := range rf.Log.Entries {
-					if entry.Term == conflictTerm {
-						hasConflictTerm = true
+				peerNextIndex := -1
+				for i := len(rf.Log.Entries); i > 0; i-- {
+					if rf.Log.Entries[i-1].Term == conflictTerm {
+						peerNextIndex = i + rf.Log.Index0
 						break
 					}
 				}
-				if !hasConflictTerm {
-					// case 1: Leader 没有 ConflictTerm: 意味着 Leader 的日志在这个任期上是"缺失"的
+
+				if peerNextIndex == -1 {
+					// case 1: Leader 没有 XTerm: 意味着 Leader 的日志在这个任期上是"缺失"的
 					// 应该直接回退到 Follower 中该任期开始的位置（XIndex），从这里开始同步日志，覆盖掉 Follower 该任期的日志。
-					rf.nextIndex[to] = reply.ConflictIndex
+					rf.nextIndex[peer] = reply.XIndex
 				} else {
-					// case 2: Leader 有 ConflictTerm
+					// case 2: Leader 有 XTerm
 					// 如果 Leader 有相同的任期，但日志内容可能不同，Leader 应该找到自己日志中该任期的最后一个条目，然后从下一个位置开始同步。
 					// 目的是快速跳过 Follower 中可能存在的该任期的所有冲突条目。
-					for i := len(rf.Log.Entries); i > 0; i-- {
-						if rf.Log.Entries[i-1].Term == conflictTerm {
-							rf.nextIndex[to] = i + rf.Log.Index0
-							break
-						}
-					}
+					rf.nextIndex[peer] = peerNextIndex
 				}
 			}
 			// 立即重试，不等待心跳
@@ -603,7 +585,7 @@ func (rf *Raft) replicateLog(to int) {
 		}
 
 		rf.mu.Unlock()
-		// 等待下一次心跳或新日志
+		// 等待下一次心跳或新日志 todo 计算一次再判断需要立即发送还是等待心跳
 		if hasLogsToReplicate {
 			// 如果有日志需要复制，立即继续处理下一个日志
 			continue
@@ -643,8 +625,8 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 
 		// prevLogIndex 超出 Follower 日志范围
 		if prevLogIndex > latestLogIndex {
-			e.reply.ConflictTerm = -1
-			e.reply.ConflictIndex = -1
+			e.reply.XTerm = -1
+			e.reply.XIndex = -1
 			e.reply.XLen = len(entries)
 			return
 		}
@@ -653,19 +635,19 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		// 找到发生冲突的 term 的首个日志 index
 		entry := rf.Log.getEntry(prevLogIndex)
 		ConflictTerm := entry.Term
-		e.reply.ConflictTerm = ConflictTerm
+		e.reply.XTerm = ConflictTerm
 		for i, entry := range entries {
 			log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
 			//log.Printf("S%v 回溯日志, i=%v,  =%v", rf.me, i, prevLogTerm)
 			if entry.Term == ConflictTerm {
-				e.reply.ConflictIndex = i + rf.Log.Index0
+				e.reply.XIndex = i + rf.Log.Index0
 				// 立即删除冲突的日志
-				prevLogRelativeIndex := e.reply.ConflictIndex - rf.Log.Index0
+				prevLogRelativeIndex := e.reply.XIndex - rf.Log.Index0
 				rf.Log.Entries = entries[:prevLogRelativeIndex]
 				break
 			}
 		}
-		log.Printf("S%v 回溯日志, ConflictTerm=%v, ConflictIndex=%v", rf.me, entry.Term, e.reply.ConflictIndex)
+		log.Printf("S%v 回溯日志, XTerm=%v, XIndex=%v", rf.me, entry.Term, e.reply.XIndex)
 		return
 	}
 
@@ -903,11 +885,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	rf.state = Follower
-	rf.eventChan = make(chan interface{}, 100)
+	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(200, 350))
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
 	go rf.eventLoop()
 
