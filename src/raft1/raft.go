@@ -540,7 +540,7 @@ func (rf *Raft) replicateLog(to int) {
 		rf.mu.Lock()
 
 		log.Printf("leader S%v 收到 S%v 的追加日志响应: %+v", rf.me, to, reply)
-		// 如果 follower 任期比我大，则主动退位，即使这个 Follower 并不代表拥有最新日志，交给 Term 去处理，重新开始选举或者做其他什么事
+		// 如果 follower 任期比我大，则主动退位
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", to, rf.me)
 			rf.state = Follower
@@ -636,8 +636,6 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
-	rf.resetElectionTimer(250, 400)
-
 	entries := rf.Log.Entries
 
 	if !rf.Log.isSameLogEntry(prevLogIndex, prevLogTerm) {
@@ -662,7 +660,8 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 			if entry.Term == ConflictTerm {
 				e.reply.ConflictIndex = i + rf.Log.Index0
 				// 立即删除冲突的日志
-				rf.Log.Entries = entries[:e.reply.ConflictIndex]
+				prevLogRelativeIndex := e.reply.ConflictIndex - rf.Log.Index0
+				rf.Log.Entries = entries[:prevLogRelativeIndex]
 				break
 			}
 		}
@@ -673,6 +672,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	// 确定 Leader 的领导地位
 	rf.state = Follower
 	rf.leaderId = e.args.LeaderId
+	rf.resetElectionTimer(250, 400)
 	// 获取截断日志的相对索引，e.args.PrevLogIndex >= rf.commitIndex 确保不会擦除提交的日志
 	if len(e.args.Entries) > 0 {
 		prevLogRelativeIndex := e.args.PrevLogIndex - rf.Log.Index0
