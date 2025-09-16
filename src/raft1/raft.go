@@ -249,6 +249,10 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.CurrentTerm = CurrentTerm
 	rf.VotedFor = VotedFor
 	rf.Log = Log
+
+	index, _ := rf.Log.LastEntry()
+	rf.lastApplied = index
+	rf.commitIndex = index
 }
 
 // how many bytes in Raft's persisted Log?
@@ -436,9 +440,23 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	// 目前实现是不会重复投票，所以只统计一次，如果请求丢失还会补发请求，那么这里要修改
 	//DPrintf("Term: %v, S%v, 收到 S%v 投票响应: %v", rf.CurrentTerm, rf.me, e.from, e.reply.VoteGranted)
 
-	// 忽略过期的响应
-	if e.reply.Term != rf.CurrentTerm {
+	// 如果响应携带更新的任期，退回 Follower
+	if e.reply.Term > rf.CurrentTerm {
+		rf.CurrentTerm = e.reply.Term
+		rf.state = Follower
+		rf.VotedFor = -1
+		rf.persist()
+		rf.resetElectionTimer(250, 400)
+		return
+	}
+
+	// 忽略过期的响应 todo 是不是可以放在修改日志那里
+	if e.reply.Term < rf.CurrentTerm {
 		DPrintf("Term: %v, S%v, 收到 S%v 在 term=%v 时的投票响应, 丢弃响应", rf.CurrentTerm, rf.me, e.from, e.reply.Term)
+		return
+	}
+
+	if rf.state != Candidate {
 		return
 	}
 
@@ -526,7 +544,7 @@ func (rf *Raft) replicateLog(to int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", to, rf.me)
 			rf.state = Follower
-			//rf.resetElectionTimer(250, 400)
+			rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			// CurrentTerm 变化，持久化一次
@@ -602,6 +620,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	// 无论如何 term 应该先保证，这意味着一个时代的开始
 	if e.args.Term < rf.CurrentTerm {
 		e.reply.Success = false
+		e.reply.Term = rf.CurrentTerm
 		return
 	}
 
@@ -639,7 +658,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		e.reply.ConflictTerm = ConflictTerm
 		for i, entry := range entries {
 			log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
-			//log.Printf("S%v 回溯日志, i=%v, PrevLogTerm=%v", rf.me, i, prevLogTerm)
+			//log.Printf("S%v 回溯日志, i=%v,  =%v", rf.me, i, prevLogTerm)
 			if entry.Term == ConflictTerm {
 				e.reply.ConflictIndex = i + rf.Log.Index0
 				// 立即删除冲突的日志
