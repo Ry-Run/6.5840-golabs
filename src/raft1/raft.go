@@ -547,12 +547,10 @@ func (rf *Raft) replicateLog(peer int) {
 			// 可以更新  nextIndex 和 matchIndex
 			rf.nextIndex[peer] = commitIndex + 1
 			rf.matchIndex[peer] = commitIndex
-			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, peer, PrevLogIndex+1, PrevLogIndex, rf.Log.Entries)
+			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, peer, commitIndex+1, commitIndex, rf.Log.Entries)
 			//log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, peer, PrevLogIndex + 1, PrevLogIndex)
-			// 判断是否能够：提交日志、应用到状态机
-			if len(entries) > 0 {
-				rf.leaderCommitAndApplyLog(commitIndex, entries[len(entries)-1].Term)
-			}
+			// 判断是否能够：提交日志、应用到状态机，错误做法：只有 len(entries) > 0 才提交，但是心跳又会导致越界，如何正确的获取到这个Term？
+			rf.leaderCommitAndApplyLog(commitIndex, rf.Log.getEntry(commitIndex).Term)
 		} else {
 			conflictTerm := reply.XTerm
 			if conflictTerm == -1 {
