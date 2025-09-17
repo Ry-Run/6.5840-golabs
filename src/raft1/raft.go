@@ -597,6 +597,8 @@ func (rf *Raft) replicateLog(peer int) {
 func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	defer close(e.done)
 	log.Printf("Term=%v 的 S%v 收到 Term=%v 的 S%v 的追加日志请求: %+v", rf.CurrentTerm, rf.me, e.args.Term, e.args.LeaderId, e.args)
+
+	e.reply.Term = rf.CurrentTerm
 	// 无论如何 term 应该先保证，这意味着一个时代的开始
 	if e.args.Term < rf.CurrentTerm {
 		e.reply.Success = false
@@ -607,12 +609,10 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	if e.args.Term > rf.CurrentTerm {
 		rf.state = Follower
 		rf.CurrentTerm = e.args.Term
-		rf.leaderId = e.args.LeaderId
-		rf.VotedFor = e.args.LeaderId
+		rf.leaderId = -1
+		rf.VotedFor = -1
 		rf.persist()
 	}
-
-	e.reply.Term = rf.CurrentTerm
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
@@ -634,10 +634,10 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		entry := rf.Log.getEntry(prevLogIndex)
 		ConflictTerm := entry.Term
 		e.reply.XTerm = ConflictTerm
-		for i, entry := range entries {
+		for i := prevLogIndex - rf.Log.Index0; i >= 0; i-- {
 			log.Printf("S%v 回溯日志, i=%v, entry=%v, PrevLogTerm=%v", rf.me, i, entry, prevLogTerm)
 			//log.Printf("S%v 回溯日志, i=%v,  =%v", rf.me, i, prevLogTerm)
-			if entry.Term == ConflictTerm {
+			if entries[i-1].Term != ConflictTerm {
 				e.reply.XIndex = i + rf.Log.Index0
 				// 立即删除冲突的日志
 				prevLogRelativeIndex := e.reply.XIndex - rf.Log.Index0
@@ -650,8 +650,6 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	}
 
 	// 确定 Leader 的领导地位
-	rf.state = Follower
-	rf.leaderId = e.args.LeaderId
 	rf.resetElectionTimer(250, 400)
 	// 获取截断日志的相对索引，e.args.PrevLogIndex >= rf.commitIndex 确保不会擦除提交的日志
 	if len(e.args.Entries) > 0 {
