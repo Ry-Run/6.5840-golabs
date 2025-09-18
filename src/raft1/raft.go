@@ -139,6 +139,17 @@ func (l *Log) getEntry(index int) (entry LogEntry) {
 	return l.Entries[i]
 }
 
+// 判断 index, term 这个日志日志是不是至少最新
+func (l *Log) isAtLeast(index, term int) bool {
+	// 检查候选人的日志是否至少和自己一样新
+	lastLogIndex, lastTerm := l.LastEntry()
+	// 候选人的最后日志任期更小
+	if term < lastTerm || term == lastTerm && index < lastLogIndex {
+		return false
+	}
+	return true
+}
+
 // 开始选举事件
 type StartElectionEvent struct{}
 
@@ -381,14 +392,15 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 	// 如果候选人的任期更大，更新自己的状态
 	if e.args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.args.Term
-		rf.VotedFor = -1
+		rf.VotedFor = 0
 		rf.state = Follower
+		rf.voteGranted = 0
 		// CurrentTerm、VotedFor 变化，持久化一次
 		rf.persist()
 	}
 
 	// raft 节点每个 Term 都只有一票，所以我已经在本轮投票给非请求者了，直接拒绝
-	if rf.CurrentTerm == e.args.Term && rf.VotedFor >= 0 && rf.VotedFor != e.args.CandidateId {
+	if rf.VotedFor >= 0 && rf.VotedFor != e.args.CandidateId {
 		e.reply.Term = rf.CurrentTerm
 		e.reply.VoteGranted = false
 		return
@@ -427,15 +439,10 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	if e.reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.reply.Term
 		rf.state = Follower
-		rf.VotedFor = -1
+		rf.voteGranted = 0
+		rf.VotedFor = 0
 		rf.persist()
 		//rf.resetElectionTimer(250, 400)
-		return
-	}
-
-	// 忽略过期的响应
-	if e.reply.Term < rf.CurrentTerm {
-		DPrintf("Term: %v, S%v, 收到 S%v 在 term=%v 时的投票响应, 丢弃响应", rf.CurrentTerm, rf.me, e.from, e.reply.Term)
 		return
 	}
 
@@ -448,13 +455,10 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	}
 
 	rf.voteGranted++
-	if rf.voteGranted > len(rf.peers)/2 && rf.state != Leader {
+	if rf.voteGranted > len(rf.peers)/2 {
 		DPrintf("Term: %v, S%v 成为 Leader", rf.CurrentTerm, rf.me)
 		rf.state = Leader
 		rf.leaderId = rf.me
-		// 这里重置了计时器，但是要考虑，如果转为了 follower，那么定时器应该重置为 150 ~ 300 ms，所以当有 term 比自己高的 leader 出现、心跳大部分没响应时，应该这样做
-		// 立即发送心跳
-		//rf.sendEvent(StartAppendEntriesEvent{true})
 		lastIndex, _ := rf.Log.LastEntry()
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
@@ -525,9 +529,10 @@ func (rf *Raft) replicateLog(peer int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
 			rf.state = Follower
+			rf.voteGranted = 0
 			//rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
-			rf.VotedFor = -1
+			rf.VotedFor = 0
 			// CurrentTerm 变化，持久化一次
 			rf.persist()
 			rf.mu.Unlock()
@@ -603,18 +608,21 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		e.reply.Term = rf.CurrentTerm
 		return
 	}
-	rf.resetElectionTimer(250, 400)
-	if e.args.Term > rf.CurrentTerm {
+
+	if e.args.Term >= rf.CurrentTerm {
 		rf.state = Follower
+		rf.voteGranted = 0
 		rf.CurrentTerm = e.args.Term
-		rf.leaderId = -1
-		rf.VotedFor = -1
+		rf.leaderId = e.args.LeaderId
+		rf.VotedFor = 0
 		rf.persist()
 	}
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
 	entries := rf.Log.Entries
+	// 即使后续日志检查失败，领导者仍然活跃，重置计时器是必要的
+	rf.resetElectionTimer(250, 400)
 
 	if !rf.Log.isSameLogEntry(prevLogIndex, prevLogTerm) {
 		e.reply.Success = false
@@ -702,7 +710,7 @@ func (rf *Raft) applyLog() {
 		willApply := rf.lastApplied + 1
 		// 截取日志
 		entries, startIndex, _ := rf.Log.slice(willApply, rf.commitIndex)
-		// 应用日志时，要按顺序
+		// 应用日志时，要按顺序，这里有并发问题导致日志乱序
 		go func() {
 			for index, entry := range entries {
 				rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
@@ -861,7 +869,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.CurrentTerm = 0
-	rf.VotedFor = -1
+	rf.VotedFor = 0
 	rf.applyCh = applyCh
 	// index 0 放入 term 0，确保初始的一致性检查总是成功
 	rf.Log = Log{
@@ -878,6 +886,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	rf.state = Follower
+	rf.voteGranted = 0
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(250, 400)) // N 毫秒后发送一次消息，一次性
