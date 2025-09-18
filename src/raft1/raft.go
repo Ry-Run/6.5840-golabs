@@ -9,14 +9,12 @@ package raft
 import (
 	"bytes"
 	"log"
-	//	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"6.5840/labgob"
-	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -351,7 +349,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.VotedFor = rf.me
 	rf.voteGranted = 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
-	rf.resetElectionTimer(250, 400)
+	//rf.resetElectionTimer(250, 400)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
 
@@ -431,7 +429,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.state = Follower
 		rf.VotedFor = -1
 		rf.persist()
-		rf.resetElectionTimer(250, 400)
+		//rf.resetElectionTimer(250, 400)
 		return
 	}
 
@@ -527,7 +525,7 @@ func (rf *Raft) replicateLog(peer int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
 			rf.state = Follower
-			rf.resetElectionTimer(250, 400)
+			//rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			// CurrentTerm 变化，持久化一次
@@ -605,7 +603,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		e.reply.Term = rf.CurrentTerm
 		return
 	}
-
+	rf.resetElectionTimer(250, 400)
 	if e.args.Term > rf.CurrentTerm {
 		rf.state = Follower
 		rf.CurrentTerm = e.args.Term
@@ -649,8 +647,6 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		return
 	}
 
-	// 确定 Leader 的领导地位
-	rf.resetElectionTimer(250, 400)
 	// 获取截断日志的相对索引，e.args.PrevLogIndex >= rf.commitIndex 确保不会擦除提交的日志
 	if len(e.args.Entries) > 0 {
 		prevLogRelativeIndex := e.args.PrevLogIndex - rf.Log.Index0
@@ -834,6 +830,7 @@ func (rf *Raft) handleTimeout() {
 	switch rf.state {
 	case Follower, Candidate:
 		rf.state = Candidate
+		rf.resetElectionTimer(250, 400)
 		rf.sendEvent(StartElectionEvent{})
 	case Leader:
 	default:
@@ -843,7 +840,7 @@ func (rf *Raft) handleTimeout() {
 // 使用 [start, end) 毫秒，重置超时计时器
 func (rf *Raft) resetElectionTimer(start, end int) {
 	rf.electionTimer.Stop()
-	rf.electionTimer.Reset(rf.randomElectionTimeout(start, end))
+	rf.electionTimer.Reset(rf.randomElectionTimeout(start, end)) // 重置或设置
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -883,7 +880,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
-	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(200, 350))
+	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(250, 400)) // N 毫秒后发送一次消息，一次性
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
