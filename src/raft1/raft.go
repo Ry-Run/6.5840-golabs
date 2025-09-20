@@ -164,6 +164,7 @@ type VoteRequestEvent struct {
 type VoteResponseEvent struct {
 	from  int
 	reply *RequestVoteReply
+	term  int // 发起投票时的 term
 }
 
 // Follower 处理追加日志事件
@@ -373,7 +374,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 		go func(i int) {
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &args, &reply); ok {
-				rf.sendEvent(VoteResponseEvent{i, &reply})
+				rf.sendEvent(VoteResponseEvent{i, &reply, rf.CurrentTerm})
 			}
 		}(i)
 	}
@@ -434,9 +435,6 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 }
 
 func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
-	// 目前实现是不会重复投票，所以只统计一次，如果请求丢失还会补发请求，那么这里要修改
-	//DPrintf("Term: %v, S%v, 收到 S%v 投票响应: %v", rf.CurrentTerm, rf.me, e.from, e.reply.VoteGranted)
-
 	// 如果响应携带更新的任期，退回 Follower
 	if e.reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.reply.Term
@@ -445,7 +443,11 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.persist()
-		//rf.resetElectionTimer(250, 400)
+		return
+	}
+
+	// 防止被其他 term 响应修改
+	if rf.CurrentTerm != e.term {
 		return
 	}
 
