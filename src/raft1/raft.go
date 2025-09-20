@@ -392,7 +392,8 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 	// 如果候选人的任期更大，更新自己的状态
 	if e.args.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.args.Term
-		rf.VotedFor = 0
+		rf.VotedFor = -1
+		rf.leaderId = -1
 		rf.state = Follower
 		rf.voteGranted = 0
 		// CurrentTerm、VotedFor 变化，持久化一次
@@ -420,6 +421,7 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 		// 候选人的日志足够新
 		// 当前 term 有票 && 请求者的日志是最新的，投给它
 		rf.VotedFor = e.args.CandidateId
+		rf.leaderId = e.args.CandidateId
 		rf.CurrentTerm = e.args.Term
 		e.reply.Term = rf.CurrentTerm
 		e.reply.VoteGranted = true
@@ -440,7 +442,8 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.CurrentTerm = e.reply.Term
 		rf.state = Follower
 		rf.voteGranted = 0
-		rf.VotedFor = 0
+		rf.VotedFor = -1
+		rf.leaderId = -1
 		rf.persist()
 		//rf.resetElectionTimer(250, 400)
 		return
@@ -532,7 +535,8 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.voteGranted = 0
 			//rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
-			rf.VotedFor = 0
+			rf.VotedFor = -1
+			rf.leaderId = -1
 			// CurrentTerm 变化，持久化一次
 			rf.persist()
 			rf.mu.Unlock()
@@ -614,7 +618,8 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		rf.voteGranted = 0
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
-		rf.VotedFor = 0
+		rf.VotedFor = -1
+		rf.leaderId = -1
 		rf.persist()
 	}
 
@@ -625,6 +630,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	rf.resetElectionTimer(250, 400)
 
 	if !rf.Log.isSameLogEntry(prevLogIndex, prevLogTerm) {
+		log.Printf("S%v 日志不一致，entries=%+v", rf.me, rf.Log.Entries)
 		e.reply.Success = false
 
 		// prevLogIndex 超出 Follower 日志范围
@@ -869,7 +875,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.CurrentTerm = 0
-	rf.VotedFor = 0
+	rf.VotedFor = -1
+	rf.leaderId = -1
 	rf.applyCh = applyCh
 	// index 0 放入 term 0，确保初始的一致性检查总是成功
 	rf.Log = Log{
