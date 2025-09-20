@@ -361,7 +361,6 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.VotedFor = rf.me
 	rf.voteGranted = 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
-	//rf.resetElectionTimer(250, 400)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
 
@@ -464,6 +463,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		DPrintf("Term: %v, S%v 成为 Leader", rf.CurrentTerm, rf.me)
 		rf.state = Leader
 		rf.leaderId = rf.me
+		rf.voteGranted = 0
 		lastIndex, _ := rf.Log.LastEntry()
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
@@ -522,6 +522,7 @@ func (rf *Raft) replicateLog(peer int) {
 
 		if !ok {
 			// RPC 失败，等待一段时间后重试
+			log.Printf("S%v 发送%s到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
 			time.Sleep(time.Millisecond * 50)
 			continue
 		}
@@ -535,7 +536,6 @@ func (rf *Raft) replicateLog(peer int) {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
 			rf.state = Follower
 			rf.voteGranted = 0
-			//rf.resetElectionTimer(250, 400)
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			rf.leaderId = -1
@@ -558,7 +558,6 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.matchIndex[peer] = commitIndex
 			log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v, entries=%+v", rf.me, peer, commitIndex+1, commitIndex, rf.Log.Entries)
 			//log.Printf("Leader S%v 设置 S%v 的 nextIndex=%v, matchIndex=%v", rf.me, peer, PrevLogIndex + 1, PrevLogIndex)
-			// 判断是否能够：提交日志、应用到状态机，错误做法：只有 len(entries) > 0 才提交，但是心跳又会导致越界，如何正确的获取到这个Term？
 			rf.leaderCommitAndApplyLog(commitIndex, rf.Log.getEntry(commitIndex).Term)
 		} else {
 			conflictTerm := reply.XTerm
@@ -621,14 +620,13 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
 		rf.VotedFor = -1
-		rf.leaderId = -1
 		rf.persist()
 	}
 
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
 	entries := rf.Log.Entries
-	// 即使后续日志检查失败，领导者仍然活跃，重置计时器是必要的
+	// 只要收到有效任期的 AppendEntries，就应该重置选举计时器
 	rf.resetElectionTimer(250, 400)
 
 	if !rf.Log.isSameLogEntry(prevLogIndex, prevLogTerm) {
@@ -795,6 +793,9 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	close(rf.timerStopChan)
+	if rf.electionTimer != nil {
+		rf.electionTimer.Stop()
+	}
 }
 
 func (rf *Raft) killed() bool {
