@@ -371,9 +371,16 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 			continue
 		}
 		go func(i int) {
+			rf.mu.Lock()
+			state := rf.state
+			rf.mu.Unlock()
+			//如果已经不再是候选者 则直接返回
+			if state != Candidate {
+				return
+			}
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &args, &reply); ok {
-				rf.sendEvent(VoteResponseEvent{i, &reply, rf.CurrentTerm})
+				rf.sendEvent(VoteResponseEvent{i, &reply, args.Term})
 			}
 		}(i)
 	}
@@ -523,7 +530,7 @@ func (rf *Raft) replicateLog(peer int) {
 		if !ok {
 			// RPC 失败，等待一段时间后重试
 			log.Printf("S%v 发送%s到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
-			time.Sleep(time.Millisecond * 50)
+			time.Sleep(time.Millisecond * 20)
 			continue
 		}
 
@@ -606,7 +613,6 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	defer close(e.done)
 	log.Printf("Term=%v 的 S%v 收到 Term=%v 的 S%v 的追加日志请求: %+v", rf.CurrentTerm, rf.me, e.args.Term, e.args.LeaderId, e.args)
 
-	e.reply.Term = rf.CurrentTerm
 	// 无论如何 term 应该先保证，这意味着一个时代的开始
 	if e.args.Term < rf.CurrentTerm {
 		e.reply.Success = false
@@ -619,10 +625,11 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		rf.voteGranted = 0
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
-		rf.VotedFor = -1
+		rf.VotedFor = e.args.LeaderId
 		rf.persist()
 	}
 
+	e.reply.Term = rf.CurrentTerm
 	prevLogIndex, prevLogTerm, leaderCommitIndex := e.args.PrevLogIndex, e.args.PrevLogTerm, e.args.LeaderCommitIndex
 	latestLogIndex, _ := rf.Log.LastEntry()
 	entries := rf.Log.Entries
@@ -821,7 +828,6 @@ func (rf *Raft) randomElectionTimeout(start, end int) time.Duration {
 	if start >= end {
 		// 简单点，直接挂掉
 		log.Panic("error: start >= end")
-		rf.Kill()
 	}
 	return time.Duration(start+rand.Intn(end-start+1)) * time.Millisecond
 }
