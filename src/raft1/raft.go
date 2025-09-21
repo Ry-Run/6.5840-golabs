@@ -56,8 +56,6 @@ type Raft struct {
 	// 选举计时器
 	electionTimer *time.Timer
 
-	// 投票计数器
-	voteGranted int
 	// 应用指令到状态机
 	applyCh chan raftapi.ApplyMsg
 }
@@ -111,6 +109,7 @@ func (l *Log) sliceEnd(index int) (entries []LogEntry, lastIndex, lastTerm int) 
 func (l *Log) slice(start, end int) (entries []LogEntry, startIndex, startTerm int) {
 	lastIndex, _ := l.LastEntry()
 
+	// todo 应该大于index0
 	if 0 <= start && start <= end && end <= lastIndex {
 		relativeStart := start - l.Index0
 		relativeEnd := end - l.Index0
@@ -150,6 +149,12 @@ func (l *Log) isAtLeast(index, term int) bool {
 	return true
 }
 
+// 判断 index, term 这个日志日志是不是至少最新
+func (l *Log) hasLogsToReplicate(nextIndex int) bool {
+	lastIndex, _ := l.LastEntry()
+	return nextIndex <= lastIndex
+}
+
 // 开始选举事件
 type StartElectionEvent struct{}
 
@@ -162,9 +167,10 @@ type VoteRequestEvent struct {
 
 // 投票响应事件
 type VoteResponseEvent struct {
-	from  int
-	reply *RequestVoteReply
-	term  int // 发起投票时的 term
+	from        int
+	reply       *RequestVoteReply
+	term        int  // 发起投票时的 term
+	voteGranted *int // 指向当前选举的投票计数器
 }
 
 // Follower 处理追加日志事件
@@ -359,7 +365,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.state = Candidate
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
-	rf.voteGranted = 1
+	voteGranted := 1
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
@@ -380,7 +386,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 			}
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &args, &reply); ok {
-				rf.sendEvent(VoteResponseEvent{i, &reply, args.Term})
+				rf.sendEvent(VoteResponseEvent{i, &reply, args.Term, &voteGranted})
 			}
 		}(i)
 	}
@@ -402,7 +408,6 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.state = Follower
-		rf.voteGranted = 0
 		// CurrentTerm、VotedFor 变化，持久化一次
 		rf.persist()
 	}
@@ -445,7 +450,6 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 	if e.reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.reply.Term
 		rf.state = Follower
-		rf.voteGranted = 0
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.persist()
@@ -465,12 +469,11 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		return
 	}
 
-	rf.voteGranted++
-	if rf.voteGranted > len(rf.peers)/2 {
+	*e.voteGranted++
+	if *e.voteGranted > len(rf.peers)/2 {
 		DPrintf("Term: %v, S%v 成为 Leader", rf.CurrentTerm, rf.me)
 		rf.state = Leader
 		rf.leaderId = rf.me
-		rf.voteGranted = 0
 		lastIndex, _ := rf.Log.LastEntry()
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
@@ -478,6 +481,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 				rf.nextIndex[i] = lastIndex + 1
 				rf.matchIndex[i] = 0
 				// 开始复制日志的协程
+				log.Printf("leader s%v 启动日志复制、心跳协程", rf.me)
 				go rf.replicateLog(i)
 			}
 		}
@@ -497,17 +501,15 @@ func (rf *Raft) replicateLog(peer int) {
 
 		// 检查是否有日志需要复制
 		nextIndex := rf.nextIndex[peer]
-		lastIndex, _ := rf.Log.LastEntry()
-		hasLogsToReplicate := nextIndex <= lastIndex
 		var s string
 
 		// 准备参数
 		var entries []LogEntry
 
 		// 有日志时发生日志，空闲时发送心跳
-		if hasLogsToReplicate {
+		if rf.Log.hasLogsToReplicate(nextIndex) {
 			// 有日志需要复制
-			entries, _, _ = rf.Log.sliceEnd(rf.nextIndex[peer])
+			entries, _, _ = rf.Log.sliceEnd(nextIndex)
 			s = "日志"
 		} else {
 			// 心跳负责保持地位、确认日志一致性
@@ -515,7 +517,7 @@ func (rf *Raft) replicateLog(peer int) {
 			s = "心跳"
 		}
 
-		PrevLogIndex := max(rf.nextIndex[peer]-1, 0)
+		PrevLogIndex := max(nextIndex-1, 0)
 		PrevLogTerm := rf.Log.getEntry(PrevLogIndex).Term
 
 		log.Printf("S%v 发送%s到 S%v, PrevLogIndex: %v, PrevLogTerm: %v, commitIndex:%v", rf.me, s, peer, PrevLogIndex, PrevLogTerm, rf.commitIndex)
@@ -529,8 +531,7 @@ func (rf *Raft) replicateLog(peer int) {
 
 		if !ok {
 			// RPC 失败，等待一段时间后重试
-			log.Printf("S%v 发送%s到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
-			time.Sleep(time.Millisecond * 20)
+			log.Printf("S%v 发送%s RPC 到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
 			continue
 		}
 
@@ -542,7 +543,6 @@ func (rf *Raft) replicateLog(peer int) {
 		if reply.Term > rf.CurrentTerm {
 			log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
 			rf.state = Follower
-			rf.voteGranted = 0
 			rf.CurrentTerm = reply.Term
 			rf.VotedFor = -1
 			rf.leaderId = -1
@@ -597,14 +597,16 @@ func (rf *Raft) replicateLog(peer int) {
 			continue
 		}
 
+		// 等待下一次心跳或新日志
+		hasLogsToReplicate := rf.Log.hasLogsToReplicate(rf.nextIndex[peer])
 		rf.mu.Unlock()
-		// 等待下一次心跳或新日志 todo 计算一次再判断需要立即发送还是等待心跳
+
 		if hasLogsToReplicate {
 			// 如果有日志需要复制，立即继续处理下一个日志
 			continue
 		} else {
 			// 如果没有日志需要复制，等待心跳间隔
-			<-heartbeatTicker.C // 阻塞 100 毫秒后 heartbeatTicker 发出信号
+			<-heartbeatTicker.C // 阻塞 x 毫秒后 heartbeatTicker 发出信号
 		}
 	}
 }
@@ -622,7 +624,6 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 
 	if e.args.Term >= rf.CurrentTerm {
 		rf.state = Follower
-		rf.voteGranted = 0
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
 		rf.VotedFor = e.args.LeaderId
@@ -862,7 +863,14 @@ func (rf *Raft) handleTimeout() {
 
 // 使用 [start, end) 毫秒，重置超时计时器
 func (rf *Raft) resetElectionTimer(start, end int) {
-	rf.electionTimer.Stop()
+	// 停止计时器，如果返回 false 表示计时器已经触发
+	if !rf.electionTimer.Stop() {
+		// 尝试从通道中取出可能存在的待处理事件
+		select {
+		case <-rf.electionTimer.C: // 清空通道
+		default: // 如果通道为空，则不阻塞
+		}
+	}
 	rf.electionTimer.Reset(rf.randomElectionTimeout(start, end)) // 重置或设置
 }
 
@@ -902,7 +910,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	rf.state = Follower
-	rf.voteGranted = 0
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(250, 400)) // N 毫秒后发送一次消息，一次性
