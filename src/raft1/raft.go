@@ -453,6 +453,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.persist()
+		rf.resetElectionTimer(250, 400)
 		return
 	}
 
