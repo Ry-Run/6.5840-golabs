@@ -109,7 +109,7 @@ func (l *Log) sliceEnd(index int) (entries []LogEntry, lastIndex, lastTerm int) 
 func (l *Log) slice(start, end int) (entries []LogEntry, startIndex, startTerm int) {
 	lastIndex, _ := l.LastEntry()
 
-	// todo 应该大于index0
+	// todo 应该大于 index0
 	if 0 <= start && start <= end && end <= lastIndex {
 		relativeStart := start - l.Index0
 		relativeEnd := end - l.Index0
@@ -294,7 +294,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	done := make(chan struct{})
-	rf.sendEvent(VoteRequestEvent{args, reply, done})
+	go rf.sendEvent(VoteRequestEvent{args, reply, done})
 	<-done // 等待事件处理完成
 	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
 }
@@ -319,7 +319,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	done := make(chan struct{})
-	rf.sendEvent(AppendEntriesEvent{args, reply, done})
+	go rf.sendEvent(AppendEntriesEvent{args, reply, done})
 	<-done // 等待事件处理完成
 	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
 }
@@ -386,7 +386,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 			}
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &args, &reply); ok {
-				rf.sendEvent(VoteResponseEvent{i, &reply, args.Term, &voteGranted})
+				go rf.sendEvent(VoteResponseEvent{i, &reply, args.Term, &voteGranted})
 			}
 		}(i)
 	}
@@ -856,7 +856,7 @@ func (rf *Raft) handleTimeout() {
 	case Follower, Candidate:
 		rf.state = Candidate
 		rf.resetElectionTimer(250, 400)
-		rf.sendEvent(StartElectionEvent{})
+		go rf.sendEvent(StartElectionEvent{})
 	case Leader:
 	default:
 	}
@@ -905,9 +905,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	for i, _ := range rf.peers {
-		rf.nextIndex[i] = rf.Log.Index0 + 1
-		rf.matchIndex[i] = 0
+	for server := range rf.peers {
+		rf.nextIndex[server] = rf.Log.Index0 + 1
+		rf.matchIndex[server] = 0
 	}
 
 	rf.state = Follower
