@@ -438,7 +438,7 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 		e.reply.Term = rf.CurrentTerm
 		e.reply.VoteGranted = true
 		// 计时器重置
-		rf.resetElectionTimer(250, 400)
+		rf.resetElectionTimer()
 		DPrintf("Term: %v, S%v 投票给 S%v, reply VoteGranted=%v", rf.CurrentTerm, rf.me, e.args.CandidateId, e.reply.VoteGranted)
 		// CurrentTerm、VotedFor 变化，持久化一次
 		rf.persist()
@@ -453,7 +453,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.persist()
-		rf.resetElectionTimer(250, 400)
+		rf.resetElectionTimer()
 		return
 	}
 
@@ -549,12 +549,13 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.leaderId = -1
 			// CurrentTerm 变化，持久化一次
 			rf.persist()
+			rf.resetElectionTimer()
 			rf.mu.Unlock()
 			return
 		}
 
 		// 只处理当前 term 的响应
-		if rf.state != Leader {
+		if reply.Term != rf.CurrentTerm || rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
@@ -636,7 +637,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 	latestLogIndex, _ := rf.Log.LastEntry()
 	entries := rf.Log.Entries
 	// 只要收到有效任期的 AppendEntries，就应该重置选举计时器
-	rf.resetElectionTimer(250, 400)
+	rf.resetElectionTimer()
 
 	if !rf.Log.isSameLogEntry(prevLogIndex, prevLogTerm) {
 		log.Printf("S%v 日志不一致，entries=%+v", rf.me, rf.Log.Entries)
@@ -855,7 +856,7 @@ func (rf *Raft) handleTimeout() {
 	switch rf.state {
 	case Follower, Candidate:
 		rf.state = Candidate
-		rf.resetElectionTimer(250, 400)
+		rf.resetElectionTimer()
 		go rf.sendEvent(StartElectionEvent{})
 	case Leader:
 	default:
@@ -863,7 +864,7 @@ func (rf *Raft) handleTimeout() {
 }
 
 // 使用 [start, end) 毫秒，重置超时计时器
-func (rf *Raft) resetElectionTimer(start, end int) {
+func (rf *Raft) resetElectionTimer() {
 	// 停止计时器，如果返回 false 表示计时器已经触发
 	if !rf.electionTimer.Stop() {
 		// 尝试从通道中取出可能存在的待处理事件
@@ -872,7 +873,7 @@ func (rf *Raft) resetElectionTimer(start, end int) {
 		default: // 如果通道为空，则不阻塞
 		}
 	}
-	rf.electionTimer.Reset(rf.randomElectionTimeout(start, end)) // 重置或设置
+	rf.electionTimer.Reset(rf.randomElectionTimeout(250, 400)) // 重置或设置
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -919,6 +920,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
 	go rf.eventLoop()
+	// 选举
+
+	// 心跳
+
+	// 提交日志
+
+	// 日志复制
 
 	return rf
 }
