@@ -169,8 +169,8 @@ type VoteRequestEvent struct {
 type VoteResponseEvent struct {
 	from        int
 	reply       *RequestVoteReply
-	term        int  // 发起投票时的 term
-	voteGranted *int // 指向当前选举的投票计数器
+	term        int    // 发起投票时的 term
+	voteGranted *int32 // 指向当前选举的投票计数器
 }
 
 // Follower 处理追加日志事件
@@ -365,7 +365,7 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 	rf.state = Candidate
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
-	voteGranted := 1
+	voteGranted := int32(1)
 	DPrintf("Term: %v, S%v 开始选举，成为候选人", rf.CurrentTerm, rf.me)
 	// 进入新任期，CurrentTerm、VotedFor 变化，持久化一次
 	rf.persist()
@@ -470,8 +470,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		return
 	}
 
-	*e.voteGranted++
-	if *e.voteGranted > len(rf.peers)/2 {
+	if atomic.AddInt32(e.voteGranted, 1) > int32(len(rf.peers)/2) {
 		DPrintf("Term: %v, S%v 成为 Leader", rf.CurrentTerm, rf.me)
 		rf.state = Leader
 		rf.leaderId = rf.me
@@ -533,6 +532,7 @@ func (rf *Raft) replicateLog(peer int) {
 		if !ok {
 			// RPC 失败，等待一段时间后重试
 			log.Printf("S%v 发送%s RPC 到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
+			time.Sleep(10 * time.Millisecond) // 短暂等待后重试
 			continue
 		}
 
@@ -628,7 +628,7 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		rf.state = Follower
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
-		rf.VotedFor = e.args.LeaderId
+		rf.VotedFor = -1
 		rf.persist()
 	}
 
@@ -821,8 +821,14 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// 检查选举计时器是否超时
+		select {
+		case <-rf.electionTimer.C:
+			// 计时器触发，处理选举超时
+			rf.handleTimeout()
+		default: // 计时器未触发，继续等待
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -841,8 +847,8 @@ func (rf *Raft) eventLoop() {
 		select {
 		case event := <-rf.eventChan:
 			rf.handleEvent(event)
-		case <-rf.electionTimer.C:
-			rf.handleTimeout()
+		//case <-rf.electionTimer.C:
+		//	rf.handleTimeout()
 		case <-rf.timerStopChan:
 			return
 		}
@@ -873,7 +879,7 @@ func (rf *Raft) resetElectionTimer() {
 		default: // 如果通道为空，则不阻塞
 		}
 	}
-	rf.electionTimer.Reset(rf.randomElectionTimeout(250, 400)) // 重置或设置
+	rf.electionTimer.Reset(rf.randomElectionTimeout(350, 550)) // 重置或设置
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -914,14 +920,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
-	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(250, 400)) // N 毫秒后发送一次消息，一次性
+	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(350, 550)) // N 毫秒后发送一次消息，一次性
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
 	go rf.eventLoop()
 	// 选举
-
+	go rf.ticker()
 	// 心跳
 
 	// 提交日志
