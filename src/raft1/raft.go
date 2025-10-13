@@ -294,9 +294,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	done := make(chan struct{})
-	go rf.sendEvent(VoteRequestEvent{args, reply, done})
-	<-done // 等待事件处理完成
-	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
+	rf.RequestVoteHandler(VoteRequestEvent{args, reply, done})
 }
 
 type AppendEntriesArgs struct {
@@ -319,9 +317,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	done := make(chan struct{})
-	go rf.sendEvent(AppendEntriesEvent{args, reply, done})
-	<-done // 等待事件处理完成
-	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
+	rf.AppendEntriesHandler(AppendEntriesEvent{args, reply, done})
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -386,13 +382,15 @@ func (rf *Raft) StartElectionEventHandler(e StartElectionEvent) {
 			}
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &args, &reply); ok {
-				go rf.sendEvent(VoteResponseEvent{i, &reply, args.Term, &voteGranted})
+				rf.VoteResponseHandler(VoteResponseEvent{i, &reply, args.Term, &voteGranted})
 			}
 		}(i)
 	}
 }
 
 func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	defer close(e.done)
 	// 候选人 term 比我小，直接拒绝
 	if e.args.Term < rf.CurrentTerm {
@@ -446,6 +444,9 @@ func (rf *Raft) RequestVoteHandler(e VoteRequestEvent) {
 }
 
 func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	// 如果响应携带更新的任期，退回 Follower
 	if e.reply.Term > rf.CurrentTerm {
 		rf.CurrentTerm = e.reply.Term
@@ -614,6 +615,8 @@ func (rf *Raft) replicateLog(peer int) {
 }
 
 func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	defer close(e.done)
 	log.Printf("Term=%v 的 S%v 收到 Term=%v 的 S%v 的追加日志请求: %+v", rf.CurrentTerm, rf.me, e.args.Term, e.args.LeaderId, e.args)
 
@@ -726,34 +729,32 @@ func (rf *Raft) applyLog() {
 		willApply := rf.lastApplied + 1
 		// 截取日志
 		entries, startIndex, _ := rf.Log.slice(willApply, rf.commitIndex)
-		// 应用日志时，要按顺序，这里有并发问题导致日志乱序
-		go func() {
-			for index, entry := range entries {
-				rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
-			}
-		}()
-		// 重要!! 直接更新 lastApplied，否则上面的计算+协程优化没有意义
+		// 应用日志时，要按顺序
+		for index, entry := range entries {
+			rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
+		}
+		// 直接更新 lastApplied
 		rf.lastApplied = rf.commitIndex
 		log.Printf("S%v 应用日志: %+v, lastApplied=%v, commitIndex=%v", rf.me, entries, rf.lastApplied, rf.commitIndex)
 		//log.Printf("S%v 应用日志: lastApplied=%v, commitIndex=%v", rf.me, rf.lastApplied, rf.commitIndex)
 	}
 }
 
-func (rf *Raft) handleEvent(event interface{}) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	switch e := event.(type) {
-	case StartElectionEvent:
-		rf.StartElectionEventHandler(e)
-	case VoteRequestEvent:
-		rf.RequestVoteHandler(e)
-	case VoteResponseEvent:
-		rf.VoteResponseHandler(e)
-	case AppendEntriesEvent:
-		rf.AppendEntriesHandler(e)
-	}
-}
+//func (rf *Raft) handleEvent(event interface{}) {
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//
+//	switch e := event.(type) {
+//	case StartElectionEvent:
+//		//rf.StartElectionEventHandler(e)
+//	case VoteRequestEvent:
+//		rf.RequestVoteHandler(e)
+//	case VoteResponseEvent:
+//		//rf.VoteResponseHandler(e)
+//	case AppendEntriesEvent:
+//		//rf.AppendEntriesHandler(e)
+//	}
+//}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's Log. if this
@@ -841,19 +842,19 @@ func (rf *Raft) randomElectionTimeout(start, end int) time.Duration {
 	return time.Duration(start+rand.Intn(end-start+1)) * time.Millisecond
 }
 
-func (rf *Raft) eventLoop() {
-	DPrintf("S%v 开始事件循环", rf.me)
-	for !rf.killed() {
-		select {
-		case event := <-rf.eventChan:
-			rf.handleEvent(event)
-		//case <-rf.electionTimer.C:
-		//	rf.handleTimeout()
-		case <-rf.timerStopChan:
-			return
-		}
-	}
-}
+//func (rf *Raft) eventLoop() {
+//	DPrintf("S%v 开始事件循环", rf.me)
+//	for !rf.killed() {
+//		select {
+//		case event := <-rf.eventChan:
+//			rf.handleEvent(event)
+//		//case <-rf.electionTimer.C:
+//		//	rf.handleTimeout()
+//		case <-rf.timerStopChan:
+//			return
+//		}
+//	}
+//}
 
 func (rf *Raft) handleTimeout() {
 	rf.mu.Lock()
@@ -863,7 +864,7 @@ func (rf *Raft) handleTimeout() {
 	case Follower, Candidate:
 		rf.state = Candidate
 		rf.resetElectionTimer()
-		go rf.sendEvent(StartElectionEvent{})
+		rf.StartElectionEventHandler(StartElectionEvent{})
 	case Leader:
 	default:
 	}
@@ -925,7 +926,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
-	go rf.eventLoop()
+	//go rf.eventLoop()
 	// 选举
 	go rf.ticker()
 	// 心跳
