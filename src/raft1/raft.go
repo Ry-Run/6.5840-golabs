@@ -730,9 +730,11 @@ func (rf *Raft) applyLog() {
 		// 截取日志
 		entries, startIndex, _ := rf.Log.slice(willApply, rf.commitIndex)
 		// 应用日志时，要按顺序
+		rf.mu.Unlock()
 		for index, entry := range entries {
 			rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
 		}
+		rf.mu.Lock()
 		// 直接更新 lastApplied
 		rf.lastApplied = rf.commitIndex
 		log.Printf("S%v 应用日志: %+v, lastApplied=%v, commitIndex=%v", rf.me, entries, rf.lastApplied, rf.commitIndex)
