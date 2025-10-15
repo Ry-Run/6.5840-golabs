@@ -453,6 +453,7 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.VotedFor = -1
 		rf.leaderId = -1
 		rf.persist()
+		rf.resetElectionTimer(250, 400)
 		return
 	}
 
@@ -622,12 +623,17 @@ func (rf *Raft) AppendEntriesHandler(e AppendEntriesEvent) {
 		return
 	}
 
-	if e.args.Term >= rf.CurrentTerm {
+	// 如果是更新到更高的任期，重置本地任期与投票；若同一任期，仅确认对方为Leader，不要清空投票，避免同任期重复投票
+	if e.args.Term > rf.CurrentTerm {
 		rf.state = Follower
 		rf.CurrentTerm = e.args.Term
 		rf.leaderId = e.args.LeaderId
-		rf.VotedFor = e.args.LeaderId
+		rf.VotedFor = -1
 		rf.persist()
+	} else {
+		// e.args.Term == rf.CurrentTerm
+		rf.state = Follower
+		rf.leaderId = e.args.LeaderId
 	}
 
 	e.reply.Term = rf.CurrentTerm
