@@ -475,6 +475,11 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		DPrintf("Term: %v, S%v 成为 Leader", rf.CurrentTerm, rf.me)
 		rf.state = Leader
 		rf.leaderId = rf.me
+
+		// 新任 Leader 先追加一个空操作，帮助推进 commitIndex，目前通过不了，因为 Command 只能传 int
+		//noopIndex, _ := rf.AppendEntry(LogEntry{Term: rf.CurrentTerm, Command: nil})
+		//rf.matchIndex[rf.me] = noopIndex
+
 		lastIndex, _ := rf.Log.LastEntry()
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
@@ -490,7 +495,8 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 }
 
 func (rf *Raft) replicateLog(peer int) {
-	heartbeatTicker := time.NewTicker(50 * time.Millisecond) // 心跳间隔
+	const heartbeatInterval = 50 * time.Millisecond
+	heartbeatTicker := time.NewTicker(heartbeatInterval) // 心跳间隔
 	defer heartbeatTicker.Stop()
 
 	for !rf.killed() {
@@ -526,20 +532,39 @@ func (rf *Raft) replicateLog(peer int) {
 
 		// 阻塞调用前解锁
 		rf.mu.Unlock()
-		//  发送 AppendEntries 请求
-		var reply AppendEntriesReply
-		ok := rf.sendAppendEntries(peer, &args, &reply)
+		type appendResult struct {
+			ok    bool
+			reply AppendEntriesReply
+		}
 
-		if !ok {
+		// 不要阻塞复制日志任务，超时立即重发，不要等待，否则极端环境下无法达成一致
+		replyCh := make(chan appendResult, 1)
+		go func() {
+			var reply AppendEntriesReply
+			ok := rf.sendAppendEntries(peer, &args, &reply)
+			replyCh <- appendResult{ok: ok, reply: reply}
+		}()
+
+		var result appendResult
+		select {
+		case res := <-replyCh:
+			result = res
+		// 超时立即重发，不要等待，否则极端环境下无法达成一致
+		case <-time.After(heartbeatInterval):
+			log.Printf("S%v 发送%s RPC 到 S%v 超时，稍后重试", rf.me, s, peer)
+			continue
+		}
+
+		if !result.ok {
 			// RPC 失败，等待一段时间后重试
 			log.Printf("S%v 发送%s RPC 到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
-			time.Sleep(10 * time.Millisecond) // 短暂等待后重试
 			continue
 		}
 
 		// 处理响应
 		rf.mu.Lock()
 
+		reply := result.reply
 		log.Printf("leader S%v 收到 S%v 的追加日志响应: %+v", rf.me, peer, reply)
 		// 如果 follower 任期比我大，则主动退位
 		if reply.Term > rf.CurrentTerm {
@@ -725,6 +750,7 @@ func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int)
 }
 
 // 如果 commitIndex > lastApplied 所有机器都应该应用日志，注意应用日志时，要按顺序
+// 可以优化的地方：应用到 applyCh 时，可以释放锁，但是不能保证这个日志是应用到机器后才响应的，可能响应时还没真正应用这个日志
 func (rf *Raft) applyLog() {
 	// 只要 commitIndex > lastApplied，就可以应用到状态机
 	if rf.commitIndex > rf.lastApplied {
