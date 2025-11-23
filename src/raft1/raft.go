@@ -476,6 +476,10 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 		rf.state = Leader
 		rf.leaderId = rf.me
 		lastIndex, _ := rf.Log.LastEntry()
+		// 新任 Leader 先追加一个空操作，帮助推进 commitIndex
+		//noopIndex, _ := rf.AppendEntry(LogEntry{rf.CurrentTerm, nil})
+		//rf.matchIndex[rf.me] = noopIndex
+
 		// 重置 nextIndex、matchIndex
 		for i, _ := range rf.peers {
 			if i != rf.me {
@@ -490,7 +494,8 @@ func (rf *Raft) VoteResponseHandler(e VoteResponseEvent) {
 }
 
 func (rf *Raft) replicateLog(peer int) {
-	heartbeatTicker := time.NewTicker(50 * time.Millisecond) // 心跳间隔
+	const heartbeatInterval = 50 * time.Millisecond
+	heartbeatTicker := time.NewTicker(heartbeatInterval) // 心跳间隔
 	defer heartbeatTicker.Stop()
 
 	for !rf.killed() {
@@ -526,11 +531,30 @@ func (rf *Raft) replicateLog(peer int) {
 
 		// 阻塞调用前解锁
 		rf.mu.Unlock()
-		//  发送 AppendEntries 请求
-		var reply AppendEntriesReply
-		ok := rf.sendAppendEntries(peer, &args, &reply)
+		type appendResult struct {
+			ok    bool
+			reply AppendEntriesReply
+		}
 
-		if !ok {
+		// 不要阻塞复制日志任务，超时立即重发，不要等待，否则极端环境下无法达成一致
+		replyCh := make(chan appendResult, 1)
+		go func() {
+			var reply AppendEntriesReply
+			ok := rf.sendAppendEntries(peer, &args, &reply)
+			replyCh <- appendResult{ok: ok, reply: reply}
+		}()
+
+		var result appendResult
+		select {
+		case res := <-replyCh:
+			result = res
+		// 超时立即重发，不要等待，否则极端环境下无法达成一致
+		case <-time.After(heartbeatInterval):
+			log.Printf("S%v 发送%s RPC 到 S%v 超时，稍后重试", rf.me, s, peer)
+			continue
+		}
+
+		if !result.ok {
 			// RPC 失败，等待一段时间后重试
 			log.Printf("S%v 发送%s RPC 到 S%v 失败，等待一段时间后重试", rf.me, s, peer)
 			continue
@@ -539,6 +563,7 @@ func (rf *Raft) replicateLog(peer int) {
 		// 处理响应
 		rf.mu.Lock()
 
+		reply := result.reply
 		log.Printf("leader S%v 收到 S%v 的追加日志响应: %+v", rf.me, peer, reply)
 		// 如果 follower 任期比我大，则主动退位
 		if reply.Term > rf.CurrentTerm {
@@ -549,12 +574,13 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.leaderId = -1
 			// CurrentTerm 变化，持久化一次
 			rf.persist()
+			rf.resetElectionTimer(250, 400)
 			rf.mu.Unlock()
 			return
 		}
 
 		// 只处理当前 term 的响应
-		if rf.state != Leader {
+		if reply.Term != rf.CurrentTerm || rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
@@ -918,7 +944,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
-	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(250, 400)) // N 毫秒后发送一次消息，一次性
+	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(800, 1200)) // N 毫秒后发送一次消息，一次性
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
