@@ -1255,7 +1255,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			ts.one(rand.Int(), servers-1, true)
 		}
 
-		// perhaps send enough to get a snapshot
+		// perhaps send enough to get a Snap
 		start := tester.GetAnnotateTimestamp()
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
@@ -1279,7 +1279,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		if disconnect {
 			// reconnect a follower, who maybe behind and
-			// needs to rceive a snapshot to catch up.
+			// needs to rceive a Snap to catch up.
 			ts.g.ConnectOne(victim)
 			tester.AnnotateConnection(ts.g.GetConnected())
 			ts.one(rand.Int(), servers, true)
@@ -1316,7 +1316,7 @@ func TestSnapshotInstallUnCrash3D(t *testing.T) {
 }
 
 // do the servers persist the snapshots, and
-// restart using snapshot along with the
+// restart using Snapshot along with the
 // tail of the Log?
 func TestSnapshotAllCrash3D(t *testing.T) {
 	servers := 3
@@ -1330,7 +1330,7 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 	ts.one(rand.Int(), servers, true)
 
 	for i := 0; i < iters; i++ {
-		// perhaps enough to get a snapshot
+		// perhaps enough to get a Snap
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
 			ts.one(rand.Int(), servers, true)
@@ -1353,7 +1353,7 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 	}
 }
 
-// do servers correctly initialize their in-memory copy of the snapshot, making
+// do servers correctly initialize their in-memory copy of the Snapshot, making
 // sure that future writes to persistent state don't lose state?
 func TestSnapshotInit3D(t *testing.T) {
 	servers := 3
@@ -1361,10 +1361,10 @@ func TestSnapshotInit3D(t *testing.T) {
 	defer ts.cleanup()
 
 	tester.AnnotateTest("TestSnapshotInit3D", servers)
-	ts.Begin("Test (3D): snapshot initialization after crash")
+	ts.Begin("Test (3D): Snap initialization after crash")
 	ts.one(rand.Int(), servers, true)
 
-	// enough ops to make a snapshot
+	// enough ops to make a Snap
 	nn := SnapShotInterval + 1
 	for i := 0; i < nn; i++ {
 		ts.one(rand.Int(), servers, true)

@@ -45,11 +45,11 @@ func newRfsrv(ts *Test, srv int, ends []*labrpc.ClientEnd, persister *tester.Per
 	if snapshot {
 		snapshot := persister.ReadSnapshot()
 		if snapshot != nil && len(snapshot) > 0 {
-			// mimic KV server and process snapshot now.
+			// mimic KV server and process Snap now.
 			// ideally Raft should send it up on applyCh...
 			err := s.ingestSnap(snapshot, -1)
 			if err != "" {
-				tester.AnnotateCheckerFailureBeforeExit("failed to ingest snapshot", err)
+				tester.AnnotateCheckerFailureBeforeExit("failed to ingest Snap", err)
 				ts.t.Fatal(err)
 			}
 		}
@@ -115,7 +115,7 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 	}
 }
 
-// periodically snapshot raft state
+// periodically Snapshot raft state
 func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 	if rs.raft == nil {
 		return // ???
@@ -152,9 +152,9 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 				start := tester.GetAnnotateTimestamp()
 				rs.raft.Snapshot(m.CommandIndex, w.Bytes())
 				details := fmt.Sprintf(
-					"snapshot created after applying the command at Index %v",
+					"Snap created after applying the command at Index %v",
 					m.CommandIndex)
-				tester.AnnotateInfoInterval(start, "snapshot created", details)
+				tester.AnnotateInfoInterval(start, "Snap created", details)
 			}
 		} else {
 			// Ignore other types of ApplyMsg.
@@ -175,9 +175,9 @@ func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
 	defer rs.mu.Unlock()
 
 	if snapshot == nil {
-		tester.AnnotateCheckerFailureBeforeExit("failed to ingest snapshot", "nil snapshot")
-		log.Fatalf("nil snapshot")
-		return "nil snapshot"
+		tester.AnnotateCheckerFailureBeforeExit("failed to ingest Snap", "nil Snap")
+		log.Fatalf("nil Snap")
+		return "nil Snap"
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
@@ -185,13 +185,13 @@ func (rs *rfsrv) ingestSnap(snapshot []byte, index int) string {
 	var xlog []any
 	if d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&xlog) != nil {
-		text := "failed to decode snapshot"
+		text := "failed to decode Snap"
 		tester.AnnotateCheckerFailureBeforeExit(text, text)
-		log.Fatalf("snapshot decode error")
-		return "snapshot Decode() error"
+		log.Fatalf("Snap decode error")
+		return "Snap Decode() error"
 	}
 	if index != -1 && index != lastIncludedIndex {
-		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", rs.me)
+		err := fmt.Sprintf("server %v Snap doesn't match m.SnapshotIndex", rs.me)
 		return err
 	}
 	rs.logs = map[int]any{}

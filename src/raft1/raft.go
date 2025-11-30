@@ -58,6 +58,9 @@ type Raft struct {
 
 	// 应用指令到状态机
 	applyCh chan raftapi.ApplyMsg
+
+	// 快照
+	Snap Snapshot
 }
 
 type State int
@@ -76,6 +79,12 @@ type LogEntry struct {
 type Log struct {
 	Index0  int // 即快照后第一个日志的索引，相当于绝对位置
 	Entries []LogEntry
+}
+
+type Snapshot struct {
+	lastIncludedTerm  int
+	lastIncludedIndex int
+	snapshot          []byte
 }
 
 // return LastEntry's index and Term
@@ -155,31 +164,6 @@ func (l *Log) hasLogsToReplicate(nextIndex int) bool {
 	return nextIndex <= lastIndex
 }
 
-// 开始选举事件
-type StartElectionEvent struct{}
-
-// 投票请求事件，处理 candidate 投票请求
-type VoteRequestEvent struct {
-	args  *RequestVoteArgs
-	reply *RequestVoteReply
-	done  chan struct{} // 阻塞 RPC 协程，避免事件还没处理，就返回调用者，导致调用者处理响应异常
-}
-
-// 投票响应事件
-type VoteResponseEvent struct {
-	from        int
-	reply       *RequestVoteReply
-	term        int  // 发起投票时的 term
-	voteGranted *int // 指向当前选举的投票计数器
-}
-
-// Follower 处理追加日志事件
-type AppendEntriesEvent struct {
-	args  *AppendEntriesArgs
-	reply *AppendEntriesReply
-	done  chan struct{} // 阻塞 RPC 协程，避免事件还没处理，就返回调用者，导致调用者处理响应异常
-}
-
 func (rf *Raft) sendEvent(event interface{}) {
 	rf.eventChan <- event
 }
@@ -198,8 +182,8 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 // before you've implemented snapshots, you should pass nil as the
 // second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot
-// (or nil if there's not yet a snapshot).
+// after you've implemented snapshots, pass the current Snapshot
+// (or nil if there's not yet a Snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
@@ -216,7 +200,12 @@ func (rf *Raft) persist() {
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Log)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+
+	s := new(bytes.Buffer)
+	se := labgob.NewEncoder(s)
+	se.Encode(rf.Snap)
+	raftSnapshot := s.Bytes()
+	rf.persister.Save(raftstate, raftSnapshot)
 }
 
 // restore previously persisted state.
@@ -243,10 +232,12 @@ func (rf *Raft) readPersist(data []byte) {
 	var CurrentTerm int
 	var VotedFor int
 	var Log Log
+	var snapshot Snapshot
 
 	if d.Decode(&CurrentTerm) != nil ||
 		d.Decode(&VotedFor) != nil ||
-		d.Decode(&Log) != nil {
+		d.Decode(&Log) != nil ||
+		d.Decode(&snapshot) != nil {
 		log.Printf("解码失败 in readPersist")
 		return
 	}
@@ -254,6 +245,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.CurrentTerm = CurrentTerm
 	rf.VotedFor = VotedFor
 	rf.Log = Log
+	rf.Snap = snapshot
 }
 
 // how many bytes in Raft's persisted Log?
@@ -263,65 +255,29 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-// the service says it has created a snapshot that has
+// the service says it has created a Snap that has
 // all info up to and including index. this means the
 // service no longer needs the Log through (and including)
 // that index. Raft should now trim its Log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 	// 0 位置不用制作为快照
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	index0 := index + 1
+	rf.Snap.snapshot = snapshot
+	rf.Snap.lastIncludedIndex = index
+	rf.Snap.lastIncludedTerm = rf.Log.getEntry(index).Term
+	rf.Log.Entries, _, _ = rf.Log.sliceEnd(index0)
+	rf.Log.Index0 = index0
+
+	rf.persist()
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (3A).
-	Term        int
-	VoteGranted bool
-}
-
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
-	done := make(chan struct{})
-	rf.sendEvent(VoteRequestEvent{args, reply, done})
-	<-done // 等待事件处理完成
-	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
-}
-
-type AppendEntriesArgs struct {
-	Term              int
-	LeaderId          int
-	PrevLogIndex      int
-	PrevLogTerm       int
-	Entries           []LogEntry
-	LeaderCommitIndex int
-}
-
-type AppendEntriesReply struct {
-	Term    int
-	Success bool
-	// 可选的优化
-	XTerm  int // 发生冲突的 entry 的 term
-	XIndex int // 发生冲突的 entry 的 term 的首个日志索引
-	XLen   int // Follower 的日志长度
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	done := make(chan struct{})
-	rf.sendEvent(AppendEntriesEvent{args, reply, done})
-	<-done // 等待事件处理完成
-	// 问题是这里会一直阻塞，可能协程泄露，先简单这样实现
+// 安装快照
+func (rf *Raft) applySnapshot() {
+	rf.applyCh <- raftapi.ApplyMsg{CommandValid: false, Snapshot: rf.Snap.snapshot}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -358,6 +314,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 
@@ -527,7 +488,15 @@ func (rf *Raft) replicateLog(peer int) {
 		PrevLogTerm := rf.Log.getEntry(PrevLogIndex).Term
 
 		log.Printf("S%v 发送%s到 S%v, PrevLogIndex: %v, PrevLogTerm: %v, commitIndex:%v", rf.me, s, peer, PrevLogIndex, PrevLogTerm, rf.commitIndex)
-		args := AppendEntriesArgs{rf.CurrentTerm, rf.me, PrevLogIndex, PrevLogTerm, entries, rf.commitIndex}
+		args := AppendEntriesArgs{
+			rf.CurrentTerm,
+			rf.me,
+			PrevLogIndex,
+			PrevLogTerm,
+			entries,
+			rf.commitIndex,
+			rf.Log.Index0,
+		}
 
 		// 阻塞调用前解锁
 		rf.mu.Unlock()
@@ -577,6 +546,21 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.resetElectionTimer(250, 400)
 			rf.mu.Unlock()
 			return
+		}
+
+		// 发送快照
+		if reply.Term < rf.CurrentTerm {
+			snapshotArgs := &InstallSnapshotArgs{
+				rf.CurrentTerm,
+				rf.me,
+				rf.Snap.lastIncludedIndex,
+				rf.Snap.lastIncludedTerm,
+				-1,
+				rf.Snap.snapshot,
+				false,
+			}
+			snapshotReply := &InstallSnapshotReply{}
+			rf.sendInstallSnapshot(peer, snapshotArgs, snapshotReply)
 		}
 
 		// 只处理当前 term 的响应
@@ -769,6 +753,19 @@ func (rf *Raft) applyLog() {
 	}
 }
 
+func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
+	//if rf.Log.Index0 >= e.args.index0 {
+	//	e.reply.Success = false
+	//	return
+	//}
+	//
+	//rf.Snap = e.args.snapshot
+	//go func() {
+	//	rf.applySnapshot()
+	//}()
+	//e.reply.Success = true
+}
+
 func (rf *Raft) handleEvent(event interface{}) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -782,6 +779,8 @@ func (rf *Raft) handleEvent(event interface{}) {
 		rf.VoteResponseHandler(e)
 	case AppendEntriesEvent:
 		rf.AppendEntriesHandler(e)
+	case InstallSnapshotEvent:
+		rf.InstallSnapshotHandler(e)
 	}
 }
 
@@ -945,8 +944,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(800, 1200)) // N 毫秒后发送一次消息，一次性
+	rf.Snap = Snapshot{lastIncludedIndex: 0, lastIncludedTerm: rf.CurrentTerm, snapshot: make([]byte, 0)}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// 安装快照
+	rf.applySnapshot()
 	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
 
 	go rf.eventLoop()
