@@ -34,7 +34,7 @@ type AppendEntriesArgs struct {
 	PrevLogTerm       int
 	Entries           []LogEntry
 	LeaderCommitIndex int
-	index0            int
+	Index0            int
 }
 
 type AppendEntriesReply struct {
@@ -55,17 +55,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 type InstallSnapshotArgs struct {
-	term              int    // leader 当前 term
-	leaderId          int    // 以便追随者可以重定向客户端
-	lastIncludedIndex int    // 快照将替换包括此索引在内的所有条目
-	lastIncludedTerm  int    // lastIncludedIndex 的 term
-	offset            int    // 快照文件中块位置的偏移量
-	data              []byte // 快照块的原始字节，从偏移量开始
-	isLast            bool   // 如果这是最后一个块/后面还有块
+	Term              int    // leader 当前 term
+	LeaderId          int    // 以便追随者可以重定向客户端
+	LastIncludedIndex int    // 快照将替换包括此索引在内的所有条目
+	LastIncludedTerm  int    // lastIncludedIndex 的 term
+	Offset            int    // 快照文件中块位置的偏移量，切片传输使用，未实现
+	Data              []byte // 快照块的原始字节，从偏移量开始
+	IsLast            bool   // 如果这是最后一个块/后面还有块
 }
 
 type InstallSnapshotReply struct {
-	currentTerm int // 供领导者自我更新
+	Term int // 当前 term，供领导者自我更新
 }
 
 // 处理 InstallSnapshot RPC

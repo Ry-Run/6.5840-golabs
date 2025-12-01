@@ -277,7 +277,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // 安装快照
 func (rf *Raft) applySnapshot() {
-	rf.applyCh <- raftapi.ApplyMsg{CommandValid: false, Snapshot: rf.Snap.snapshot}
+	msg := raftapi.ApplyMsg{SnapshotValid: true, Snapshot: rf.Snap.snapshot, SnapshotTerm: rf.Snap.lastIncludedTerm, SnapshotIndex: rf.Snap.lastIncludedIndex}
+	rf.applyCh <- msg
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -753,17 +754,64 @@ func (rf *Raft) applyLog() {
 	}
 }
 
+// 未实现分块传输快照，直接传整个，实验要求不要实现
 func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
-	//if rf.Log.Index0 >= e.args.index0 {
-	//	e.reply.Success = false
-	//	return
-	//}
-	//
-	//rf.Snap = e.args.snapshot
-	//go func() {
-	//	rf.applySnapshot()
-	//}()
-	//e.reply.Success = true
+	// 1.Reply immediately if term < currentTerm
+	if e.args.Term < rf.CurrentTerm {
+		e.reply.Term = rf.CurrentTerm
+		return
+	}
+
+	if e.args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = e.args.Term
+		rf.VotedFor = -1
+		rf.state = Follower
+	}
+
+	// 如果已有快照 index >= 新快照的 index，可以直接忽略
+	if e.args.LastIncludedIndex <= rf.Snap.lastIncludedIndex {
+		e.reply.Term = rf.CurrentTerm
+		return
+	}
+
+	// todo
+
+	// 2.Create new snapshot file if first chunk (offset is 0)
+
+	// 3.Write data into snapshot file at given offset
+
+	// 4.Reply and wait for more data chunks if done is false
+
+	// 5.Save snapshot file, discard any existing or partial snapshot with a smaller index
+
+	// 6.If existing log entry has same index and term as snapshot’s last included entry, retain log entries following it and reply
+
+	// 未实现分块传输
+	rf.Snap.snapshot = e.args.Data
+	rf.Snap.lastIncludedTerm = e.args.LastIncludedTerm
+	rf.Snap.lastIncludedIndex = e.args.LastIncludedIndex
+
+	// 7.Discard the entire log
+	entry := rf.Log.getEntry(e.args.LastIncludedIndex)
+	// follower 的 log 在 lastIncludedIndex 那一项不存在，或者，它在那个位置上的 term != lastIncludedTerm
+	if entry.Term != rf.Snap.lastIncludedTerm {
+		// 我当前的日志在 snapshot 覆盖的范围里是不可靠的、冲突的
+		// 丢弃整个日志
+		rf.Log.Index0 = 0
+		rf.Log.Entries = rf.Log.Entries[0:1]
+	}
+
+	// 到了这一步，一定有 Index0 < lastIncludedIndex
+	index0 := e.args.LastIncludedIndex + 1
+	lastIndex, _ := rf.Log.LastEntry()
+	rf.Log.Entries, _, _ = rf.Log.slice(index0, lastIndex)
+	// 更新 index0
+	rf.Log.Index0 = index0
+	// 持久化
+	rf.persist()
+
+	// 8.Reset state machine using snapshot contents (and load snapshot’s cluster configuration)
+	go rf.applySnapshot()
 }
 
 func (rf *Raft) handleEvent(event interface{}) {
