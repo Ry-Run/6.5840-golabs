@@ -469,6 +469,67 @@ func (rf *Raft) replicateLog(peer int) {
 
 		// 检查是否有日志需要复制
 		nextIndex := rf.nextIndex[peer]
+
+		// 发送快照
+		if nextIndex < rf.Log.Index0 {
+			type InstallSnapshotResp struct {
+				ok    bool
+				reply InstallSnapshotReply
+			}
+			snapshotReplyChan := make(chan InstallSnapshotResp, 1)
+			go func() {
+				snapshotReply := InstallSnapshotReply{}
+				snapshotArgs := &InstallSnapshotArgs{
+					rf.CurrentTerm,
+					rf.me,
+					rf.Snap.lastIncludedIndex,
+					rf.Snap.lastIncludedTerm,
+					-1,
+					rf.Snap.snapshot,
+					false,
+				}
+				ok := rf.sendInstallSnapshot(peer, snapshotArgs, &snapshotReply)
+				snapshotReplyChan <- InstallSnapshotResp{ok, snapshotReply}
+			}()
+
+			var result InstallSnapshotResp
+			select {
+			case res := <-snapshotReplyChan:
+				result = res
+			// 超时立即重发，不要等待，否则极端环境下无法达成一致
+			case <-time.After(heartbeatInterval):
+				log.Printf("S%v 发送 InstallSnapshot RPC 到 S%v 超时，稍后重试", rf.me, peer)
+				continue
+			}
+
+			if !result.ok {
+				// RPC 失败，等待一段时间后重试
+				log.Printf("S%v 发送InstallSnapshot RPC 到 S%v 失败，等待一段时间后重试", rf.me, peer)
+				continue
+			}
+
+			// 处理响应
+			rf.mu.Lock()
+
+			reply := result.reply
+			log.Printf("leader S%v 收到 S%v 的 InstallSnapshot 响应: %+v", rf.me, peer, reply)
+			// 如果 follower 任期比我大，则主动退位
+			if reply.Term > rf.CurrentTerm {
+				log.Printf("S%v 的 term 更大，Leader S%v 退位", peer, rf.me)
+				rf.state = Follower
+				rf.CurrentTerm = reply.Term
+				rf.VotedFor = -1
+				rf.leaderId = -1
+				// CurrentTerm 变化，持久化一次
+				rf.persist()
+				rf.resetElectionTimer(250, 400)
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+			continue
+		}
+
 		var s string
 
 		// 准备参数
@@ -547,21 +608,6 @@ func (rf *Raft) replicateLog(peer int) {
 			rf.resetElectionTimer(250, 400)
 			rf.mu.Unlock()
 			return
-		}
-
-		// 发送快照
-		if reply.Term < rf.CurrentTerm {
-			snapshotArgs := &InstallSnapshotArgs{
-				rf.CurrentTerm,
-				rf.me,
-				rf.Snap.lastIncludedIndex,
-				rf.Snap.lastIncludedTerm,
-				-1,
-				rf.Snap.snapshot,
-				false,
-			}
-			snapshotReply := &InstallSnapshotReply{}
-			rf.sendInstallSnapshot(peer, snapshotArgs, snapshotReply)
 		}
 
 		// 只处理当前 term 的响应
