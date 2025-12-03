@@ -82,9 +82,9 @@ type Log struct {
 }
 
 type Snapshot struct {
-	lastIncludedTerm  int
-	lastIncludedIndex int
-	snapshot          []byte
+	LastIncludedTerm  int
+	LastIncludedIndex int
+	Snapshot          []byte
 }
 
 // return LastEntry's index and Term
@@ -266,9 +266,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 
 	index0 := index + 1
-	rf.Snap.snapshot = snapshot
-	rf.Snap.lastIncludedIndex = index
-	rf.Snap.lastIncludedTerm = rf.Log.getEntry(index).Term
+	rf.Snap.Snapshot = snapshot
+	rf.Snap.LastIncludedIndex = index
+	rf.Snap.LastIncludedTerm = rf.Log.getEntry(index).Term
 	rf.Log.Entries, _, _ = rf.Log.sliceEnd(index0)
 	rf.Log.Index0 = index0
 
@@ -277,8 +277,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // 安装快照
 func (rf *Raft) applySnapshot() {
-	msg := raftapi.ApplyMsg{SnapshotValid: true, Snapshot: rf.Snap.snapshot, SnapshotTerm: rf.Snap.lastIncludedTerm, SnapshotIndex: rf.Snap.lastIncludedIndex}
-	rf.applyCh <- msg
+	snapshot := rf.Snap.Snapshot
+	if snapshot != nil && len(snapshot) > 0 {
+		msg := raftapi.ApplyMsg{SnapshotValid: true, Snapshot: snapshot, SnapshotTerm: rf.Snap.LastIncludedTerm, SnapshotIndex: rf.Snap.LastIncludedIndex}
+		rf.applyCh <- msg
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -482,10 +485,10 @@ func (rf *Raft) replicateLog(peer int) {
 				snapshotArgs := &InstallSnapshotArgs{
 					rf.CurrentTerm,
 					rf.me,
-					rf.Snap.lastIncludedIndex,
-					rf.Snap.lastIncludedTerm,
+					rf.Snap.LastIncludedIndex,
+					rf.Snap.LastIncludedTerm,
 					-1,
-					rf.Snap.snapshot,
+					rf.Snap.Snapshot,
 					false,
 				}
 				ok := rf.sendInstallSnapshot(peer, snapshotArgs, &snapshotReply)
@@ -502,7 +505,11 @@ func (rf *Raft) replicateLog(peer int) {
 				continue
 			}
 
-			if !result.ok {
+			if result.ok {
+				rf.nextIndex[peer] = rf.Snap.LastIncludedIndex + 1
+				rf.matchIndex[peer] = rf.Snap.LastIncludedIndex
+				continue
+			} else {
 				// RPC 失败，等待一段时间后重试
 				log.Printf("S%v 发送InstallSnapshot RPC 到 S%v 失败，等待一段时间后重试", rf.me, peer)
 				continue
@@ -815,39 +822,39 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	}
 
 	// 如果已有快照 index >= 新快照的 index，可以直接忽略
-	if e.args.LastIncludedIndex <= rf.Snap.lastIncludedIndex {
+	if e.args.LastIncludedIndex <= rf.Snap.LastIncludedIndex {
 		e.reply.Term = rf.CurrentTerm
 		return
 	}
 
 	// todo
 
-	// 2.Create new snapshot file if first chunk (offset is 0)
+	// 2.Create new Snapshot file if first chunk (offset is 0)
 
-	// 3.Write data into snapshot file at given offset
+	// 3.Write data into Snapshot file at given offset
 
 	// 4.Reply and wait for more data chunks if done is false
 
-	// 5.Save snapshot file, discard any existing or partial snapshot with a smaller index
+	// 5.Save Snapshot file, discard any existing or partial Snapshot with a smaller index
 
-	// 6.If existing log entry has same index and term as snapshot’s last included entry, retain log entries following it and reply
+	// 6.If existing log entry has same index and term as Snapshot’s last included entry, retain log entries following it and reply
 
 	// 未实现分块传输
-	rf.Snap.snapshot = e.args.Data
-	rf.Snap.lastIncludedTerm = e.args.LastIncludedTerm
-	rf.Snap.lastIncludedIndex = e.args.LastIncludedIndex
+	rf.Snap.Snapshot = e.args.Data
+	rf.Snap.LastIncludedTerm = e.args.LastIncludedTerm
+	rf.Snap.LastIncludedIndex = e.args.LastIncludedIndex
 
 	// 7.Discard the entire log
 	entry := rf.Log.getEntry(e.args.LastIncludedIndex)
-	// follower 的 log 在 lastIncludedIndex 那一项不存在，或者，它在那个位置上的 term != lastIncludedTerm
-	if entry.Term != rf.Snap.lastIncludedTerm {
-		// 我当前的日志在 snapshot 覆盖的范围里是不可靠的、冲突的
+	// follower 的 log 在 LastIncludedIndex 那一项不存在，或者，它在那个位置上的 term != LastIncludedTerm
+	if entry.Term != rf.Snap.LastIncludedTerm {
+		// 我当前的日志在 Snapshot 覆盖的范围里是不可靠的、冲突的
 		// 丢弃整个日志
 		rf.Log.Index0 = 0
 		rf.Log.Entries = rf.Log.Entries[0:1]
 	}
 
-	// 到了这一步，一定有 Index0 < lastIncludedIndex
+	// 到了这一步，一定有 Index0 < LastIncludedIndex
 	index0 := e.args.LastIncludedIndex + 1
 	lastIndex, _ := rf.Log.LastEntry()
 	rf.Log.Entries, _, _ = rf.Log.slice(index0, lastIndex)
@@ -856,7 +863,7 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	// 持久化
 	rf.persist()
 
-	// 8.Reset state machine using snapshot contents (and load snapshot’s cluster configuration)
+	// 8.Reset state machine using Snapshot contents (and load Snapshot’s cluster configuration)
 	go rf.applySnapshot()
 }
 
@@ -1038,12 +1045,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.eventChan = make(chan interface{}, 1000)
 	rf.timerStopChan = make(chan struct{})
 	rf.electionTimer = time.NewTimer(rf.randomElectionTimeout(800, 1200)) // N 毫秒后发送一次消息，一次性
-	rf.Snap = Snapshot{lastIncludedIndex: 0, lastIncludedTerm: rf.CurrentTerm, snapshot: make([]byte, 0)}
+	rf.Snap = Snapshot{LastIncludedIndex: 0, LastIncludedTerm: rf.CurrentTerm, Snapshot: make([]byte, 0)}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// 安装快照
-	rf.applySnapshot()
-	DPrintf("R[%d_%d] is now online.\n", rf.me, rf.CurrentTerm)
+	go rf.applySnapshot()
 
 	go rf.eventLoop()
 
