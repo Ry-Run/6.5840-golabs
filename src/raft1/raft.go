@@ -141,7 +141,7 @@ func (l *Log) isSameLogEntry(index, term int) bool {
 // index 位置的 entry（在整个 logs 的 index，即绝对位置） 和 term
 func (l *Log) getEntry(index int) (entry LogEntry) {
 	i := index - l.Index0
-	if i >= len(l.Entries) {
+	if i < 0 || i >= len(l.Entries) {
 		return LogEntry{Term: -1}
 	}
 	return l.Entries[i]
@@ -246,6 +246,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.VotedFor = VotedFor
 	rf.Log = Log
 	rf.Snap = snapshot
+	rf.Log.Index0 = snapshot.LastIncludedIndex
 }
 
 // how many bytes in Raft's persisted Log?
@@ -265,12 +266,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	index0 := index + 1
+	// 记录快照元信息
 	rf.Snap.Snapshot = snapshot
 	rf.Snap.LastIncludedIndex = index
 	rf.Snap.LastIncludedTerm = rf.Log.getEntry(index).Term
-	rf.Log.Entries, _, _ = rf.Log.sliceEnd(index0)
-	rf.Log.Index0 = index0
+	log.Printf("制作快照前的 log: %v, index=%v, index0=%v", rf.Log.Entries, index, rf.Log.Index0)
+	offset := index - rf.Log.Index0
+	rf.Log.Entries = rf.Log.Entries[offset:]
+	rf.Log.Index0 = index
+	log.Printf("制作快照后的 log: %v, index0=%v", rf.Log.Entries, index)
 
 	rf.persist()
 }

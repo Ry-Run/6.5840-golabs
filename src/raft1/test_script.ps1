@@ -1,6 +1,6 @@
 # 参数（可按需修改）
 $maxAttempts = 10
-$goal = 3
+$goal = 7
 $log = "C:\Users\Administrator\GolandProjects\6.5840-golabs\raft-3C.log"   # 日志文件路径，按需修改为你的路径
 $totalTime = 0.0
 
@@ -14,7 +14,7 @@ for ($count = 1; $count -le $maxAttempts; ) {
     # 如果需要追加请改为 Add-Content 或 Out-File -Append
     try {
         # 调用 go test 并把所有输出捕获到日志
-        & go test -run 3A 2>&1 | Out-File -FilePath $log -Encoding utf8
+        & go test -run 3D 2>&1 | Out-File -FilePath $log -Encoding utf8
     } catch {
         # 如果执行 go 命令失败（例如找不到 go），也把异常写入日志
         $_ | Out-File -FilePath $log -Encoding utf8
