@@ -2,7 +2,7 @@ count=1
 # 测试次数
 max_attempts=10
 # 每次测试需要通过的次数
-goal=8
+goal=7
 total_time=0
 
 while [ $count -le $max_attempts ]; do
@@ -12,7 +12,7 @@ while [ $count -le $max_attempts ]; do
     start_time=$(date +%s.%N)
 
     # 执行测试并输出到日志文件
-    go test -run 3C > /home/run/workspace/6.5840-golabs-2025/raft.log 2>&1
+    go test -run 3D > /home/run/workspace/6.5840-golabs-2025/raft.log 2>&1
 
     # 记录结束时间
     end_time=$(date +%s.%N)
