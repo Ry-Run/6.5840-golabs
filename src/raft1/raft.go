@@ -247,6 +247,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.Log = Log
 	rf.Snap.LastIncludedIndex = LastIncludedIndex
 	rf.Snap.LastIncludedTerm = LastIncludedTerm
+	rf.commitIndex = LastIncludedIndex
+	rf.lastApplied = LastIncludedIndex
 }
 
 // how many bytes in Raft's persisted Log?
@@ -281,13 +283,22 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 // 安装快照
 func (rf *Raft) applySnapshot() {
+	rf.mu.Lock()
 	snapshot := rf.Snap.Snapshot
+	term := rf.Snap.LastIncludedTerm
+	index := rf.Snap.LastIncludedIndex
+	rf.mu.Unlock()
+
 	if snapshot != nil && len(snapshot) > 0 {
-		msg := raftapi.ApplyMsg{SnapshotValid: true, Snapshot: snapshot, SnapshotTerm: rf.Snap.LastIncludedTerm, SnapshotIndex: rf.Snap.LastIncludedIndex}
+		msg := raftapi.ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      snapshot,
+			SnapshotTerm:  term,
+			SnapshotIndex: index,
+		}
 		rf.applyCh <- msg
 	}
-	rf.commitIndex = rf.Snap.LastIncludedIndex
-	rf.lastApplied = rf.Snap.LastIncludedIndex
+	log.Printf("follower S%v 安装快照完成: term=%v, index=%v", rf.me, term, index)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -501,7 +512,7 @@ func (rf *Raft) replicateLog(peer int) {
 
 			go func() {
 				snapshotReply := InstallSnapshotReply{}
-				DPrintf("Term: %v, S%v 发送快照： %+v", rf.CurrentTerm, rf.me, snapshotArgs)
+				DPrintf("Term: %v, S%v 发送快照到 follower %v： %+v", rf.CurrentTerm, rf.me, peer, snapshotArgs)
 				ok := rf.sendInstallSnapshot(peer, snapshotArgs, &snapshotReply)
 				snapshotReplyChan <- InstallSnapshotResp{ok, snapshotReply}
 			}()
@@ -779,7 +790,7 @@ func (rf *Raft) leaderCommitAndApplyLog(index, term int) {
 func (rf *Raft) followerCommitAndApplyLog(leaderCommitIndex, latestLogIndex int) {
 	if rf.commitIndex < leaderCommitIndex {
 		rf.commitIndex = min(leaderCommitIndex, latestLogIndex)
-		log.Printf("Follower S%v 提交日志 commitIndex=%+v", rf.me, rf.commitIndex)
+		log.Printf("Follower S%v 提交日志 commitIndex=%+v, entries=%+v", rf.me, rf.commitIndex, rf.Log.Entries)
 		rf.applyLog()
 	}
 }
@@ -797,7 +808,9 @@ func (rf *Raft) applyLog() {
 		// 应用日志时，要按顺序，这里有并发问题导致日志乱序
 		go func() {
 			for index, entry := range entries {
-				rf.applyCh <- raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
+				msg := raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
+				rf.applyCh <- msg
+				log.Printf("S%v 应用日志: msg=%+v", rf.me, msg)
 			}
 		}()
 		// 重要!! 直接更新 lastApplied，否则上面的计算+协程优化没有意义
@@ -842,7 +855,6 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	// 6.If existing log entry has same index and term as Snapshot’s last included entry, retain log entries following it and reply
 
 	// 未实现分块传输
-	log.Printf("follower S%v 安装快照: LastIncludedTerm=%v, LastIncludedIndex=%v", rf.me, e.args.LastIncludedTerm, e.args.LastIncludedIndex)
 	rf.Snap.Snapshot = e.args.Data
 	rf.Snap.LastIncludedTerm = e.args.LastIncludedTerm
 	rf.Snap.LastIncludedIndex = e.args.LastIncludedIndex
@@ -859,6 +871,7 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	rf.state = Follower
 	rf.commitIndex = e.args.LastIncludedIndex
 	rf.lastApplied = e.args.LastIncludedIndex
+	log.Printf("follower S%v 安装快照: LastIncludedTerm=%v, LastIncludedIndex=%v, entries=%+v", rf.me, e.args.LastIncludedTerm, e.args.LastIncludedIndex, rf.Log.Entries)
 
 	// 8.Reset state machine using Snapshot contents (and load Snapshot’s cluster configuration)
 	go rf.applySnapshot()
