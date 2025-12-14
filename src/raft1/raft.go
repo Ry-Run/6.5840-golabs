@@ -58,6 +58,8 @@ type Raft struct {
 
 	// 应用指令到状态机
 	applyCh chan raftapi.ApplyMsg
+	// 等待发送到 applyCh 的消息
+	applyEvents chan LogEvent
 
 	// 快照
 	Snap Snapshot
@@ -272,33 +274,34 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.Snap.Snapshot = snapshot
 	rf.Snap.LastIncludedIndex = index
 	rf.Snap.LastIncludedTerm = rf.Log.getEntry(index).Term
-	log.Printf("制作快照前的 log: %v, index=%v, index0=%v", rf.Log.Entries, index, rf.Log.Index0)
+	log.Printf("S%v 制作快照前的 log: %v, index=%v, index0=%v", rf.me, rf.Log.Entries, index, rf.Log.Index0)
 	offset := index - rf.Log.Index0
 	rf.Log.Entries = rf.Log.Entries[offset:] // 第一个日志是 dummy
 	rf.Log.Index0 = index
-	log.Printf("制作快照后的 log: %v, index0=%v", rf.Log.Entries, index)
+	log.Printf("S%v 制作快照后的 log: %v, index0=%v", rf.me, rf.Log.Entries, index)
 
 	rf.persist()
 }
 
 // 安装快照
 func (rf *Raft) applySnapshot() {
-	rf.mu.Lock()
 	snapshot := rf.Snap.Snapshot
 	term := rf.Snap.LastIncludedTerm
 	index := rf.Snap.LastIncludedIndex
-	rf.mu.Unlock()
 
 	if snapshot != nil && len(snapshot) > 0 {
-		msg := raftapi.ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      snapshot,
-			SnapshotTerm:  term,
-			SnapshotIndex: index,
-		}
-		rf.applyCh <- msg
+		//msg := raftapi.ApplyMsg{
+		//	SnapshotValid: true,
+		//	Snapshot:      snapshot,
+		//	SnapshotTerm:  term,
+		//	SnapshotIndex: index,
+		//}
+		//rf.applyEvents <- LogEvent{true, msg}
+		go func() {
+			rf.applyEvents <- LogEvent{isSnapshot: true, snapshot: snapshot, lastIncludedTerm: term, lastIncludedIndex: index}
+		}()
 	}
-	log.Printf("follower S%v 安装快照完成: term=%v, index=%v", rf.me, term, index)
+	log.Printf("follower S%v 安装快照完成: LastIncludedTerm=%v, LastIncludedIndex=%v", rf.me, term, index)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -512,7 +515,7 @@ func (rf *Raft) replicateLog(peer int) {
 
 			go func() {
 				snapshotReply := InstallSnapshotReply{}
-				DPrintf("Term: %v, S%v 发送快照到 follower %v： %+v", rf.CurrentTerm, rf.me, peer, snapshotArgs)
+				DPrintf("Term: %v, S%v 发送快照到 follower %v： %+v", snapshotArgs.Term, snapshotArgs.LeaderId, peer, snapshotArgs)
 				ok := rf.sendInstallSnapshot(peer, snapshotArgs, &snapshotReply)
 				snapshotReplyChan <- InstallSnapshotResp{ok, snapshotReply}
 			}()
@@ -808,9 +811,9 @@ func (rf *Raft) applyLog() {
 		// 应用日志时，要按顺序，这里有并发问题导致日志乱序
 		go func() {
 			for index, entry := range entries {
-				msg := raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
-				rf.applyCh <- msg
-				log.Printf("S%v 应用日志: msg=%+v", rf.me, msg)
+				//msg := raftapi.ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: index + startIndex}
+				rf.applyEvents <- LogEvent{isSnapshot: false, index: index + startIndex, command: entry.Command}
+				//log.Printf("S%v 应用日志: msg=%+v", rf.me, msg)
 			}
 		}()
 		// 重要!! 直接更新 lastApplied，否则上面的计算+协程优化没有意义
@@ -862,7 +865,7 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	// 7.Discard the entire log
 	rf.Log.Entries = []LogEntry{{Term: e.args.LastIncludedTerm}}
 	// 更新 index0
-	rf.Log.Index0 = e.args.LastIncludedIndex
+	rf.Log.Index0 = e.args.LastIncludedIndex // todo 应用日志时，先查看信号量是否有快照在安装，如果有，就返回，没有就安装
 	// 持久化
 	rf.persist()
 	// 重置选举超时
@@ -874,7 +877,7 @@ func (rf *Raft) InstallSnapshotHandler(e InstallSnapshotEvent) {
 	log.Printf("follower S%v 安装快照: LastIncludedTerm=%v, LastIncludedIndex=%v, entries=%+v", rf.me, e.args.LastIncludedTerm, e.args.LastIncludedIndex, rf.Log.Entries)
 
 	// 8.Reset state machine using Snapshot contents (and load Snapshot’s cluster configuration)
-	go rf.applySnapshot()
+	rf.applySnapshot()
 }
 
 func (rf *Raft) handleEvent(event interface{}) {
@@ -989,6 +992,91 @@ func (rf *Raft) eventLoop() {
 	}
 }
 
+func (rf *Raft) applierLoop() {
+	DPrintf("S%v 开始 applierLoop", rf.me)
+	var lastApplied int
+	pendingMsg := make(map[int]raftapi.ApplyMsg, 1000)
+
+	for !rf.killed() {
+		select {
+		case event := <-rf.applyEvents:
+			isSnapshot := event.isSnapshot
+
+			if isSnapshot {
+				if lastApplied >= event.lastIncludedIndex {
+					continue
+				}
+
+				snapshot := event.snapshot
+				term := event.lastIncludedTerm
+				index := event.lastIncludedIndex
+
+				msg := raftapi.ApplyMsg{
+					SnapshotValid: true,
+					Snapshot:      snapshot,
+					SnapshotTerm:  term,
+					SnapshotIndex: index,
+				}
+				rf.applyCh <- msg
+				lastApplied = index
+				DPrintf("S%v 应用快照 index=%v term=%v", rf.me, index, term)
+				// 先应用前面的日志
+				lastApplied = rf.applyPending(lastApplied, pendingMsg)
+
+				// 清理 pending 中被覆盖的索引
+				for k := range pendingMsg {
+					if k <= lastApplied {
+						delete(pendingMsg, k)
+						DPrintf("S%v 清理挂起的日志 index=%v", rf.me, k)
+					}
+				}
+			} else {
+				// 先应用前面的日志
+				lastApplied = rf.applyPending(lastApplied, pendingMsg)
+
+				if lastApplied >= event.index {
+					continue
+				}
+
+				command := event.command
+				index := event.index
+
+				msg := raftapi.ApplyMsg{
+					CommandValid: true,
+					Command:      command,
+					CommandIndex: index,
+				}
+
+				if lastApplied+1 == event.index {
+					rf.applyCh <- msg
+					lastApplied = index
+					log.Printf("S%v 应用日志: index=%v command=%v", rf.me, index, command)
+					// 先应用前面的日志
+					lastApplied = rf.applyPending(lastApplied, pendingMsg)
+				} else {
+					pendingMsg[index] = msg
+				}
+			}
+		case <-rf.timerStopChan:
+			return
+		}
+	}
+}
+
+func (rf *Raft) applyPending(lastApplied int, pendingMsg map[int]raftapi.ApplyMsg) int {
+	// 先应用前面的日志
+	for {
+		msg, ok := pendingMsg[lastApplied+1]
+		if !ok {
+			return lastApplied
+		}
+		lastApplied++
+		rf.applyCh <- msg
+		log.Printf("S%v 应用挂起的日志: index=%v command=%v", rf.me, msg.CommandIndex, msg.Command)
+		delete(pendingMsg, lastApplied)
+	}
+}
+
 func (rf *Raft) handleTimeout() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -1059,8 +1147,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.Snap.Snapshot = persister.ReadSnapshot()
+	rf.applyEvents = make(chan LogEvent, 1000)
+
+	go rf.applierLoop()
+
 	// 安装快照
-	go rf.applySnapshot()
+	rf.applySnapshot()
 
 	go rf.eventLoop()
 

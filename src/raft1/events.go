@@ -31,3 +31,16 @@ type InstallSnapshotEvent struct {
 	reply *InstallSnapshotReply
 	done  chan struct{} // 阻塞 RPC 协程，避免事件还没处理，就返回调用者，导致调用者处理响应异常
 }
+
+// 日志事件
+type LogEvent struct {
+	isSnapshot bool
+	//msg        raftapi.ApplyMsg
+	// 是日志
+	index   int
+	command interface{}
+	// 是快照
+	snapshot          []byte
+	lastIncludedTerm  int
+	lastIncludedIndex int
+}

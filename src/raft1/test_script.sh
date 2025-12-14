@@ -1,6 +1,6 @@
 count=1
 # 测试次数
-max_attempts=10
+max_attempts=20
 # 每次测试需要通过的次数
 goal=7
 total_time=0
